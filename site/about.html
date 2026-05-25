@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>About — Catena</title>
+  <meta name="description" content="Catena visualizes the chain of citations binding the papal encyclicals to the councils, saints, and scripture they draw upon — a modern Catena Aurea for the magisterium." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=EB+Garamond:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="reading">
+  <div class="vignette" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <main class="page">
+    <a class="page__back" href="index.html">← Explore the graph</a>
+
+    <header class="page__head">
+      <div class="mark" aria-hidden="true">✝</div>
+      <h1>Catena</h1>
+      <p class="page__lede">A visualization of the web of tradition — the connected net of
+      citations within the papal encyclicals, and the councils, saints, and scripture
+      they draw upon.</p>
+      <p class="page__counts" id="corpus-counts"></p>
+    </header>
+
+    <section class="prose">
+      <h2>The golden chain</h2>
+      <p>
+        In the thirteenth century, Thomas Aquinas compiled the <em>Catena Aurea</em> — the
+        "golden chain" — a commentary on the four Gospels assembled entirely from the words
+        of the Church Fathers. Verse by verse, he strung together quotation after quotation,
+        Greek and Latin, so that the continuous witness of tradition could be read as a single
+        unbroken chain. Nothing was invented; everything was <em>linked</em>.
+      </p>
+      <p>
+        <strong>Catena</strong> takes up that same instinct for the modern magisterium. Every
+        encyclical is woven from those before it. When Leo XIV promulgated <em>Magnifica
+        Humanitas</em> in 2026, he hung 224 footnotes upon prior encyclicals, ecumenical
+        councils, the writings of saints, papal homilies, and the words of scripture. Each
+        citation is a link in a chain reaching back across the centuries. This project makes
+        those links visible.
+      </p>
+
+      <h2>What it shows</h2>
+      <p>
+        The goal is to catalog and render the interconnectedness of the Catholic intellectual
+        tradition — to let you <em>see</em> the conversation a document is having with its
+        forebears. Catena reads each source text, extracts every reference, resolves them to
+        the works and authors they name, and draws the result as a single living constellation:
+        documents and the citations that bind them, the people and councils who wrote them, and
+        the scripture they return to again and again.
+      </p>
+
+      <h2>How to read the constellation</h2>
+      <p>Each point of light is one of three things:</p>
+      <ul class="prose__legend">
+        <li><span class="swatch swatch--document"></span>
+          <span><strong>Works</strong> — encyclicals, council documents, exhortations, and the
+          writings of the saints. The largest, brightest one is the encyclical in view; a work's
+          size grows with how often it is cited.</span></li>
+        <li><span class="swatch swatch--author"></span>
+          <span><strong>Authors &amp; councils</strong> — the popes, saints, ecumenical councils,
+          and dicasteries who stand behind those works.</span></li>
+        <li><span class="swatch swatch--scripture"></span>
+          <span><strong>Scripture</strong> — the biblical passages the tradition cites, the
+          oldest links in the chain.</span></li>
+      </ul>
+      <p>
+        A thread between two points is a citation. Where the <em>Catena Aurea</em> presents its
+        chain as a column of linked quotations, Catena presents it as a graph: hover any node to
+        trace its connections, and <strong>click to pin</strong> a node. Pin two or more and the
+        graph reveals the works that <em>bridge</em> them — for instance, selecting an encyclical
+        and a Church Father surfaces precisely the writings of that Father the encyclical leans
+        on. The detail panel always describes whatever you last clicked, and the search box (or
+        the <kbd>/</kbd> key) will find and fly to any work, author, or passage.
+      </p>
+
+      <h2>Sources &amp; method</h2>
+      <p>
+        Primary texts are drawn from <a href="https://www.vatican.va/" target="_blank" rel="noopener">vatican.va</a>,
+        with <a href="https://www.papalencyclicals.net/" target="_blank" rel="noopener">papalencyclicals.net</a>
+        as an archival fallback for older documents. A small pipeline fetches each text (politely,
+        and cached), parses its footnotes into structured citations, and collapses every language
+        edition and surface spelling of a work onto a single identity, so the same document is one
+        link in the chain no matter how it is named. Catena is a reverent index, not a substitute:
+        every node links back to the original text.
+      </p>
+
+      <h2>What comes next</h2>
+      <p>
+        Today the graph centers on a single encyclical and the works it cites. The chain grows in
+        every direction: parsing the works <em>those</em> documents cite in turn, until the
+        constellation spans the whole multi-generational tradition; an adapter for the older texts;
+        and tools to trace a single idea's lineage across the centuries.
+      </p>
+
+      <p class="prose__close"><a href="index.html">← Return to the graph</a></p>
+    </section>
+  </main>
+
+  <script>
+    // mirror live corpus counts into the lede if the graph data is present
+    fetch("data/graph.json").then((r) => r.json()).then((g) => {
+      const m = g.meta || {};
+      const el = document.getElementById("corpus-counts");
+      if (el && m.documents) {
+        el.textContent = `${m.documents.toLocaleString()} works · ${m.authors.toLocaleString()} authors · ${m.scripture.toLocaleString()} scriptures · ${m.edges.toLocaleString()} citations`;
+      }
+    }).catch(() => {});
+  </script>
+</body>
+</html>

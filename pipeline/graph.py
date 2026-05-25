@@ -1,0 +1,144 @@
+"""Turn parsed documents into a deduplicated node/edge graph.
+
+Node types:
+  - ``document``  a magisterial work (encyclical, council document, a saint's text…)
+  - ``author``    a person or body (a pope, a saint, a council, a dicastery)
+  - ``scripture`` a biblical passage (book + locator)
+
+Edge types:
+  - ``cites``           document -> document (a footnote reference)
+  - ``authored_by``     document -> author
+  - ``cites_scripture`` document -> scripture passage
+
+Documents cited both with and without a Vatican URL are collapsed onto the
+URL-backed identity via normalized-title matching, so the same work is one node.
+"""
+
+from __future__ import annotations
+
+import re
+
+from .parse import ParsedDocument
+
+
+def _norm_title(title: str | None) -> str:
+    if not title:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+
+
+class GraphBuilder:
+    def __init__(self) -> None:
+        self.nodes: dict[str, dict] = {}
+        self.edges: dict[tuple[str, str, str], dict] = {}
+        # normalized title -> canonical (URL-backed) doc key, for cross-source dedup
+        self._title_index: dict[str, str] = {}
+
+    # -- node/edge helpers -------------------------------------------------
+    def _node(self, node_id: str, node_type: str, **fields) -> dict:
+        node = self.nodes.get(node_id)
+        if node is None:
+            node = {"id": node_id, "type": node_type}
+            self.nodes[node_id] = node
+        # Merge: only fill empty fields, but let truthy values upgrade falsy ones.
+        for k, v in fields.items():
+            if v and not node.get(k):
+                node[k] = v
+        return node
+
+    def _edge(self, src: str, dst: str, etype: str) -> None:
+        if src == dst:
+            return
+        key = (src, dst, etype)
+        edge = self.edges.get(key)
+        if edge is None:
+            self.edges[key] = {"source": src, "target": dst, "type": etype, "weight": 1}
+        else:
+            edge["weight"] += 1
+
+    # -- ingestion ---------------------------------------------------------
+    def index_titles(self, docs: list[ParsedDocument]) -> None:
+        """Register URL-backed identities so text-only citations can dedupe."""
+        for doc in docs:
+            self._title_index[_norm_title(doc.title)] = doc.doc_key
+        for doc in docs:
+            for c in doc.citations:
+                if c.url:
+                    self._title_index.setdefault(_norm_title(c.title), c.target_key)
+
+    def _canonical_target(self, c) -> str:
+        if c.url:
+            return c.target_key
+        canonical = self._title_index.get(_norm_title(c.title))
+        return canonical or c.target_key
+
+    def add_document(self, doc: ParsedDocument) -> None:
+        self._node(
+            doc.doc_key, "document",
+            label=doc.title, title=doc.title, author=doc.author,
+            author_key=doc.author_key, doc_type=doc.doc_type, url=doc.url,
+            date=doc.date, in_corpus=True, is_source=True,
+        )
+        if doc.author_key:
+            aid = f"author:{doc.author_key}"
+            self._node(aid, "author", label=doc.author, name=doc.author)
+            self._edge(doc.doc_key, aid, "authored_by")
+
+        for c in doc.citations:
+            tgt = self._canonical_target(c)
+            self._node(
+                tgt, "document",
+                label=c.title, title=c.title, author=c.author,
+                author_key=c.author_key, doc_type=c.doc_type, url=c.url,
+            )
+            self._edge(doc.doc_key, tgt, "cites")
+            if c.author_key:
+                aid = f"author:{c.author_key}"
+                self._node(aid, "author", label=c.author, name=c.author)
+                self._edge(tgt, aid, "authored_by")
+
+        for s in doc.scripture:
+            locator = s["cite"][len(s["book"]) + 1:]
+            sid = f"scripture:{s['book']}|{locator}"
+            self._node(
+                sid, "scripture",
+                label=s["cite"], cite=s["cite"], book=s["book"],
+                testament=s["testament"], order=s["order"],
+            )
+            for _ in range(s["count"]):
+                self._edge(doc.doc_key, sid, "cites_scripture")
+
+    # -- finalize ----------------------------------------------------------
+    def finalize(self) -> dict:
+        # mark non-source documents as out-of-corpus and default missing flags
+        for n in self.nodes.values():
+            if n["type"] == "document":
+                n.setdefault("in_corpus", False)
+                n.setdefault("is_source", False)
+        # degree (undirected) for sizing
+        deg: dict[str, int] = {nid: 0 for nid in self.nodes}
+        for e in self.edges.values():
+            deg[e["source"]] += e["weight"]
+            deg[e["target"]] += e["weight"]
+        for nid, d in deg.items():
+            self.nodes[nid]["degree"] = d
+        return {
+            "nodes": list(self.nodes.values()),
+            "edges": list(self.edges.values()),
+        }
+
+
+def build_graph(docs: list[ParsedDocument]) -> dict:
+    gb = GraphBuilder()
+    gb.index_titles(docs)
+    for doc in docs:
+        gb.add_document(doc)
+    graph = gb.finalize()
+    graph["meta"] = {
+        "documents": sum(1 for n in graph["nodes"] if n["type"] == "document"),
+        "in_corpus": sum(1 for n in graph["nodes"] if n.get("in_corpus")),
+        "authors": sum(1 for n in graph["nodes"] if n["type"] == "author"),
+        "scripture": sum(1 for n in graph["nodes"] if n["type"] == "scripture"),
+        "edges": len(graph["edges"]),
+    }
+    return graph

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Catena — The Web of Tradition</title>
+  <meta name="description" content="A visualization of the connected net of citations within the papal encyclicals — the councils, saints, and scripture they draw upon." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=EB+Garamond:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- atmospheric layers -->
+  <div class="vignette" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <canvas id="graph"></canvas>
+
+  <!-- masthead -->
+  <header class="masthead">
+    <div class="mark" aria-hidden="true">✝</div>
+    <div class="titles">
+      <h1>Catena</h1>
+      <p class="tagline">The web of tradition — <em>the citations that bind the encyclicals to councils, saints, and scripture.</em></p>
+      <a class="masthead__about" href="about.html">About this project →</a>
+    </div>
+  </header>
+
+  <!-- top-right rail: search + corpus stats -->
+  <div class="rail">
+    <div class="search" role="search">
+      <svg class="search__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <input id="search-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Find a work, author, or scripture…" aria-label="Search the corpus"
+             role="combobox" aria-expanded="false" aria-controls="search-results" />
+      <button class="search__clear" id="search-clear" aria-label="Clear search" hidden>×</button>
+      <ul class="search__results" id="search-results" role="listbox" hidden></ul>
+    </div>
+    <aside class="stats" id="stats" aria-label="Corpus statistics"></aside>
+  </div>
+
+  <!-- selection bar (multi-select chips + connection summary) -->
+  <div class="selection" id="selection" aria-label="Selected nodes" hidden></div>
+
+  <!-- legend -->
+  <aside class="legend" aria-label="Legend and filters">
+    <h2>The Illumination</h2>
+    <ul class="legend__list">
+      <li><button class="legend__item" data-cat="source" aria-pressed="false" title="Show only the encyclicals in the corpus">
+        <span class="swatch swatch--source"></span>
+        <span class="legend__label">Encyclical</span>
+        <span class="legend__count"></span></button></li>
+      <li><button class="legend__item" data-cat="document" aria-pressed="false" title="Show only cited works">
+        <span class="swatch swatch--document"></span>
+        <span class="legend__label">Cited work</span>
+        <span class="legend__count"></span></button></li>
+      <li><button class="legend__item" data-cat="author" aria-pressed="false" title="Show only authors &amp; councils">
+        <span class="swatch swatch--author"></span>
+        <span class="legend__label">Author &amp; council</span>
+        <span class="legend__count"></span></button></li>
+      <li><button class="legend__item" data-cat="scripture" aria-pressed="false" title="Show only scripture">
+        <span class="swatch swatch--scripture"></span>
+        <span class="legend__label">Scripture</span>
+        <span class="legend__count"></span></button></li>
+    </ul>
+    <p class="hint">Drag to pan · scroll to zoom · hover to trace · click to pin works &amp; compare · tap a swatch to filter · Esc to clear</p>
+  </aside>
+
+  <!-- detail panel -->
+  <section class="detail" id="detail" aria-live="polite" hidden>
+    <button class="detail__close" id="detail-close" aria-label="Close">×</button>
+    <div class="detail__kind" id="detail-kind"></div>
+    <h3 class="detail__title" id="detail-title"></h3>
+    <dl class="detail__meta" id="detail-meta"></dl>
+    <a class="detail__link" id="detail-link" target="_blank" rel="noopener" hidden>Read at the Vatican ↗</a>
+  </section>
+
+  <div class="loading" id="loading"><span>Illuminating the manuscript…</span></div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
