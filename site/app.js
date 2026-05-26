@@ -458,9 +458,19 @@ function showDetail(n) {
 
   document.getElementById("detail-kind").textContent =
     n.is_source ? "Encyclical" :
+    n.pontiff ? "Pontiff" :
     n.type === "document" ? (n.doc_type || "Magisterial work") :
     KIND_LABEL[n.type] || n.type;
   document.getElementById("detail-title").textContent = n.label || n.id;
+
+  // Pontiff subtitle: e.g. "267th Pontiff · 2025–present"
+  const subtitle = document.getElementById("detail-subtitle");
+  if (n.pontiff) {
+    subtitle.textContent = `${n.pontiff.ordinal_label} · ${n.pontiff.reign_label}`;
+    subtitle.hidden = false;
+  } else {
+    subtitle.hidden = true;
+  }
 
   // Intrinsic facts (date, author, testament) — distinct from connection rows.
   const meta = document.getElementById("detail-meta");
@@ -517,9 +527,35 @@ function showDetail(n) {
   }
   conns.hidden = items.length === 0;
 
+  // Outbound buttons. Encyclicals get the existing "Read at the Vatican" pill;
+  // pontiffs get profile + Wikipedia buttons instead. The container clears any
+  // pontiff buttons from a previous render so they don't bleed across nodes.
+  const links = document.getElementById("detail-links");
+  for (const el of links.querySelectorAll(".detail__link--pontiff")) el.remove();
   const link = document.getElementById("detail-link");
-  if (n.url) { link.href = n.url; link.hidden = false; }
-  else link.hidden = true;
+  if (n.pontiff) {
+    link.hidden = true;
+    if (n.pontiff.vatican_url) {
+      const a = document.createElement("a");
+      a.className = "detail__link detail__link--pontiff";
+      a.target = "_blank"; a.rel = "noopener";
+      a.href = n.pontiff.vatican_url;
+      a.textContent = "Vatican profile ↗";
+      links.appendChild(a);
+    }
+    if (n.pontiff.wikipedia_url) {
+      const a = document.createElement("a");
+      a.className = "detail__link detail__link--pontiff detail__link--ghost";
+      a.target = "_blank"; a.rel = "noopener";
+      a.href = n.pontiff.wikipedia_url;
+      a.textContent = "Wikipedia ↗";
+      links.appendChild(a);
+    }
+  } else if (n.url) {
+    link.href = n.url; link.hidden = false;
+  } else {
+    link.hidden = true;
+  }
 
   panel.hidden = false;
 }

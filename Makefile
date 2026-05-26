@@ -30,6 +30,10 @@ $(GRAPH): $(PIPE_SRC)
 build: ## Rebuild the citation graph from the pipeline (force)
 	uv run catena build
 
+.PHONY: validate-pontiffs
+validate-pontiffs: ## Check curated pontiff slugs against the live Vatican index
+	uv run catena validate-pontiffs
+
 .PHONY: preview
 preview: $(PREVIEW) ## Regenerate docs/preview.png from the live site (needs Chrome)
 

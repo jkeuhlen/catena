@@ -11,7 +11,7 @@ import argparse
 import json
 import sys
 
-from . import fetch, graph, layout, parse, paths
+from . import fetch, graph, layout, parse, paths, pontiffs
 from .parse import ParsedDocument
 
 # The corpus seed set. Add more encyclical URLs here to grow the graph.
@@ -93,6 +93,62 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate_pontiffs(_args: argparse.Namespace) -> int:
+    """Fetch the live /holy-father/ index and check our curated slugs.
+
+    Reports any slug in ``pipeline.pontiffs`` that 404s against the index, plus
+    any pope on the index whose English name suggests we should add an entry.
+    Exit code is non-zero on mismatches so this can gate a build if wanted.
+    """
+    import re
+    import urllib.request
+
+    url = "https://www.vatican.va/content/vatican/en/holy-father.html"
+    print(f"Fetching {url} …", file=sys.stderr)
+    req = urllib.request.Request(url, headers={"User-Agent": "catena-validator/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 (trusted host)
+        html = resp.read().decode("utf-8", errors="replace")
+
+    # Each pope is a /content/vatican/en/holy-father/<slug>.html link.
+    slugs = set(re.findall(r"/content/vatican/en/holy-father/([a-z0-9-]+)\.html", html))
+    print(f"  found {len(slugs)} pope slugs on the index", file=sys.stderr)
+
+    bad: list[tuple[str, str]] = []
+    overrides_checked = 0
+    for key, p in pontiffs.all_entries():
+        if p.vatican_slug is not None:
+            if p.vatican_slug not in slugs:
+                bad.append((key, f"slug {p.vatican_slug!r} not on index"))
+            continue
+        # Override URL — verify it resolves with a HEAD.
+        if not p.vatican_url_override:
+            bad.append((key, "no vatican_slug and no override"))
+            continue
+        head = urllib.request.Request(
+            p.vatican_url_override, method="HEAD",
+            headers={"User-Agent": "catena-validator/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(head, timeout=15) as r:  # noqa: S310
+                if r.status >= 400:
+                    bad.append((key, f"{p.vatican_url_override} → HTTP {r.status}"))
+        except Exception as exc:  # noqa: BLE001 — surface any error verbatim
+            bad.append((key, f"{p.vatican_url_override} → {exc}"))
+        overrides_checked += 1
+
+    if bad:
+        print("\nProblems found:", file=sys.stderr)
+        for key, msg in bad:
+            print(f"  - {key!r:24}  {msg}", file=sys.stderr)
+        return 1
+    print(
+        f"All {len(pontiffs.all_keys())} curated pontiff entries resolve "
+        f"({overrides_checked} via override URL).",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="catena", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -111,6 +167,12 @@ def main(argv: list[str] | None = None) -> int:
     p_build.add_argument("urls", nargs="*", help="override the seed URLs")
     p_build.add_argument("--force", action="store_true", help="bypass the cache")
     p_build.set_defaults(func=cmd_build)
+
+    p_vp = sub.add_parser(
+        "validate-pontiffs",
+        help="check curated vatican.va slugs in pipeline.pontiffs against the live index",
+    )
+    p_vp.set_defaults(func=cmd_validate_pontiffs)
 
     args = parser.parse_args(argv)
     return args.func(args)

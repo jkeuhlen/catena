@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from . import pontiffs
 from .parse import ParsedDocument
 
 
@@ -115,6 +116,16 @@ class GraphBuilder:
             if n["type"] == "document":
                 n.setdefault("in_corpus", False)
                 n.setdefault("is_source", False)
+        # tag author nodes that name a pope with their pontiff record so the
+        # site can render the specialised card. The legend category stays
+        # ``author`` — filters and counts are unaffected.
+        for n in self.nodes.values():
+            if n["type"] != "author":
+                continue
+            key = n["id"].removeprefix("author:")
+            rec = pontiffs.lookup(key)
+            if rec:
+                n["pontiff"] = rec
         # degree (undirected) for sizing
         deg: dict[str, int] = {nid: 0 for nid in self.nodes}
         for e in self.edges.values():

@@ -351,15 +351,36 @@ body.reading { overflow: auto; }
   color: var(--parchment-dim); white-space: nowrap;
 }
 .detail__meta dd { margin: 0; text-align: right; color: var(--parchment); font-size: 1rem; }
+.detail__links {
+  margin-top: 1.2rem; display: flex; flex-wrap: wrap; gap: 0.5rem;
+}
+.detail__links:empty { display: none; }
 .detail__link {
-  display: inline-block; margin-top: 1.2rem; padding: 0.5rem 0.9rem;
+  display: inline-block; padding: 0.5rem 0.9rem;
   font-size: 0.9rem; letter-spacing: 0.04em; color: var(--ink);
   background: linear-gradient(180deg, var(--gold-bright), var(--ochre));
   text-decoration: none; border-radius: 2px;
-  box-shadow: 0 4px 14px rgba(216,182,95,0.25); transition: transform 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 14px rgba(216,182,95,0.25); transition: transform 0.2s, box-shadow 0.2s, background 0.2s, color 0.2s;
 }
 .detail__link:hover { transform: translateY(-1px); box-shadow: 0 7px 20px rgba(216,182,95,0.4); }
 .detail__link[hidden] { display: none; }  /* class display would otherwise beat [hidden] */
+/* Secondary button — same shape, quieter than the gold. Used for Wikipedia
+   alongside the primary Vatican profile button on pontiff cards. */
+.detail__link--ghost {
+  background: transparent; color: var(--parchment);
+  border: 1px solid var(--rule); box-shadow: none;
+}
+.detail__link--ghost:hover {
+  background: rgba(216, 182, 95, 0.08); color: var(--gold);
+  box-shadow: 0 4px 14px rgba(216,182,95,0.15);
+}
+
+/* Pontiff subtitle: small italic line under the regnal name. */
+.detail__subtitle {
+  margin: 0.35rem 0 0; font-family: var(--serif-body); font-style: italic;
+  font-size: 0.92rem; color: var(--parchment-dim); letter-spacing: 0.01em;
+}
+.detail__subtitle[hidden] { display: none; }
 
 /* Connection rows — selectable category breakdown, mirrors the legend. */
 .detail__connections {
