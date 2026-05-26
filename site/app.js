@@ -20,11 +20,17 @@ let DPR = Math.min(window.devicePixelRatio || 1, 2);
 
 const cam = { x: 0, y: 0, scale: 1 };       // world→screen: screen = (world - cam)*scale + center
 let nodes = [], edges = [], adj = new Map(), nodeById = new Map();
+// Directed adjacency, split by edge type. Needed because "References" vs
+// "Cited by" depends on edge direction, not just neighbour category — two
+// source encyclicals citing each other would otherwise fall into the gap.
+const outBy = new Map();   // id -> { cites:Set, authored_by:Set, cites_scripture:Set }
+const inBy  = new Map();   // id -> same shape; incoming edges
 let hovered = null;
 const selectedIds = new Set();                // pinned nodes (multi-select)
 const activeFilters = new Set();               // legend category filters
 let detailNode = null;                         // node shown in the detail panel
 const detailFilters = new Set();               // category filters scoped to detailNode
+let detailRowIds = new Map();                  // cat -> Set<id> for the rows currently in the panel
 let highlight = null;                         // Set of node ids to keep lit
 let connectors = new Set();                    // bridge nodes linking 2+ selected
 let intro = 0;                                // 0→1 entrance progress
@@ -48,8 +54,16 @@ async function init() {
   nodes = data.nodes;
   edges = data.edges;
   nodes.forEach((n) => nodeById.set(n.id, n));
-  nodes.forEach((n) => adj.set(n.id, new Set()));
-  edges.forEach((e) => { adj.get(e.source)?.add(e.target); adj.get(e.target)?.add(e.source); });
+  nodes.forEach((n) => {
+    adj.set(n.id, new Set());
+    outBy.set(n.id, { cites: new Set(), authored_by: new Set(), cites_scripture: new Set() });
+    inBy.set(n.id,  { cites: new Set(), authored_by: new Set(), cites_scripture: new Set() });
+  });
+  edges.forEach((e) => {
+    adj.get(e.source)?.add(e.target); adj.get(e.target)?.add(e.source);
+    outBy.get(e.source)?.[e.type]?.add(e.target);
+    inBy.get(e.target)?.[e.type]?.add(e.source);
+  });
 
   buildStats(data.meta);
   buildSearch();
@@ -136,25 +150,43 @@ function draw() {
 
   const lit = (id) => !highlight || highlight.has(id);
 
-  // edges
-  ctx.lineWidth = 1;
+  // Edges, drawn in three z-tiers so the selection's threads paint on top of
+  // the background instead of being criss-crossed by it:
+  //   tier 0 — unlit (faint wash)
+  //   tier 1 — lit but not touching the pinned selection (neighbour↔neighbour)
+  //   tier 2 — incident to a pinned/hovered focus node (the "selection web")
+  // When nothing is pinned, hovered/filter-only highlights fall through tier 1.
+  const focusIds = selectedIds.size ? selectedIds
+                 : (hovered && !activeFilters.size && !detailNode ? new Set([hovered.id]) : null);
+  const tiers = [[], [], []];
   for (const e of edges) {
-    const a = nodeById.get(e.source), b = nodeById.get(e.target);
-    const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
     const on = lit(e.source) && lit(e.target);
-    const tgt = nodeById.get(e.target);
-    const col = colorOf(tgt.is_source ? a : tgt);
-    const baseAlpha = e.type === "cites" ? 0.22 : 0.13;
-    ctx.strokeStyle = hexA(col, (on ? baseAlpha : 0.025) * intro);
-    ctx.lineWidth = on && highlight ? 1.3 : 0.8;
-    // gentle arc for an organic, manuscript feel
-    const mx = (ax + bx) / 2, my = (ay + by) / 2;
-    const dx = bx - ax, dy = by - ay;
-    const off = 0.07;
-    ctx.beginPath();
-    ctx.moveTo(ax, ay);
-    ctx.quadraticCurveTo(mx - dy * off, my + dx * off, bx, by);
-    ctx.stroke();
+    let tier = on ? 1 : 0;
+    if (on && focusIds && (focusIds.has(e.source) || focusIds.has(e.target))) tier = 2;
+    tiers[tier].push(e);
+  }
+  for (let t = 0; t < 3; t++) {
+    for (const e of tiers[t]) {
+      const a = nodeById.get(e.source), b = nodeById.get(e.target);
+      const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
+      const tgt = nodeById.get(e.target);
+      const col = colorOf(tgt.is_source ? a : tgt);
+      const baseAlpha = e.type === "cites" ? 0.22 : 0.13;
+      let alpha, width;
+      if (t === 0)      { alpha = highlight ? 0.012 : baseAlpha; width = 0.7; }
+      else if (t === 1) { alpha = baseAlpha * 0.9;               width = 1.1; }
+      else              { alpha = Math.min(0.95, baseAlpha * 2.6); width = 1.7; }
+      ctx.strokeStyle = hexA(t === 2 ? "#f4e4bd" : col, alpha * intro);
+      ctx.lineWidth = width;
+      // gentle arc for an organic, manuscript feel
+      const mx = (ax + bx) / 2, my = (ay + by) / 2;
+      const dx = bx - ax, dy = by - ay;
+      const off = 0.07;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.quadraticCurveTo(mx - dy * off, my + dx * off, bx, by);
+      ctx.stroke();
+    }
   }
 
   // nodes
@@ -291,6 +323,34 @@ function selectionHighlight() {
   return h;
 }
 
+// Connection rows for the detail panel, computed from directed edges so that
+// "References" follows outgoing cites (incl. to source encyclicals) and "Cited
+// by" follows incoming cites from source encyclicals. Returned as {cat, ids}
+// pairs — `cat` still drives the swatch color and the legend category.
+function detailRows(n) {
+  const rows = [];
+  const o = outBy.get(n.id), i = inBy.get(n.id);
+  if (n.type === "document") {
+    // Incoming citations from source encyclicals → "Cited by"
+    const citedBy = new Set();
+    for (const id of i.cites) if (nodeById.get(id)?.is_source) citedBy.add(id);
+    if (citedBy.size) rows.push({ key: "source", label: "Cited by", unit: "encyclical", cat: "source", ids: citedBy });
+    // Outgoing citations to any document (source or not) → "References"
+    if (o.cites.size) rows.push({ key: "document", label: "References", unit: "work", cat: "document", ids: new Set(o.cites) });
+    if (o.authored_by.size) rows.push({ key: "author", label: "Authors & councils", unit: "person", cat: "author", ids: new Set(o.authored_by) });
+    if (o.cites_scripture.size) rows.push({ key: "scripture", label: "Scripture", unit: "passage", cat: "scripture", ids: new Set(o.cites_scripture) });
+    return rows;
+  }
+  // For author / scripture nodes the only edges are incoming from documents;
+  // bucket those incoming sources by whether they're encyclical seeds or not.
+  const incoming = n.type === "author" ? i.authored_by : i.cites_scripture;
+  const srcs = new Set(), docs = new Set();
+  for (const id of incoming) (nodeById.get(id)?.is_source ? srcs : docs).add(id);
+  if (srcs.size) rows.push({ key: "source", label: "Cited in", unit: "encyclical", cat: "source", ids: srcs });
+  if (docs.size) rows.push({ key: "document", label: "Cited in", unit: "work", cat: "document", ids: docs });
+  return rows;
+}
+
 // Neighbours of `n` grouped by legend category, used by the detail panel.
 function neighboursByCategory(n) {
   const out = { source: [], document: [], author: [], scripture: [] };
@@ -314,9 +374,13 @@ function computeHighlight() {
   }
   let detailH = null;
   if (detailNode && detailFilters.size) {
+    // Use the exact id sets stashed when the panel was rendered, so the
+    // "References" toggle on a source encyclical still includes other source
+    // encyclicals it cites (those have category "source", not "document").
     detailH = new Set([detailNode.id]);
-    for (const id of adj.get(detailNode.id)) {
-      if (detailFilters.has(nodeCategory(nodeById.get(id)))) detailH.add(id);
+    for (const cat of detailFilters) {
+      const ids = detailRowIds.get(cat);
+      if (ids) for (const id of ids) detailH.add(id);
     }
   }
   // detailH narrows: if it's active and the selection is just the detail node,
@@ -485,33 +549,14 @@ function showDetail(n) {
     meta.appendChild(div);
   }
 
-  // Connection rows — neighbours grouped by category, each row selectable.
-  // For documents we split incoming (Cited by) from outgoing-document neighbours
-  // (References); authors/scripture neighbours are the same in both directions.
+  // Connection rows — built from directed edges so source-to-source citations
+  // are surfaced correctly under References (outgoing) and Cited by (incoming).
   const conns = document.getElementById("detail-connections");
   conns.innerHTML = "";
-  const byCat = neighboursByCategory(n);
-  // "Cited by" only makes sense as encyclical sources (the corpus' source docs)
-  // pointing at this node. For a source encyclical we skip it (it isn't cited
-  // by anything in the current single-generation corpus).
-  const items = [];
-  if (!n.is_source && byCat.source.length) {
-    items.push({ key: "source", label: "Cited by", unit: "encyclical",
-                 count: byCat.source.length, cat: "source" });
-  }
-  if (byCat.document.length) {
-    items.push({ key: "document", label: "References", unit: "work",
-                 count: byCat.document.length, cat: "document" });
-  }
-  if (byCat.author.length) {
-    items.push({ key: "author", label: "Authors & councils", unit: "person",
-                 count: byCat.author.length, cat: "author" });
-  }
-  if (byCat.scripture.length) {
-    items.push({ key: "scripture", label: "Scripture", unit: "passage",
-                 count: byCat.scripture.length, cat: "scripture" });
-  }
+  const items = detailRows(n);
+  detailRowIds = new Map(items.map((it) => [it.cat, it.ids]));
   for (const it of items) {
+    it.count = it.ids.size;
     const pressed = detailFilters.has(it.cat);
     const plural = it.count === 1 ? it.unit : it.unit + "s";
     const btn = document.createElement("button");
