@@ -133,6 +133,26 @@ def _normalize_locator(raw: str) -> str:
     return s.strip(" .,;")
 
 
+def is_book(token: str | None) -> bool:
+    """True if ``token`` is a scripture book name or abbreviation (case-sensitive).
+
+    Lets the citation parser reject an italicized scripture sigil ("Ps", "Gen")
+    that would otherwise be mistaken for a work title. Case-sensitive for the same
+    reason ``_ABBREV`` is — so the words "is"/"am"/"job" never match.
+
+    Also accepts a *bare suffix* of a numbered book ("Pt", "Cor", "Tim") — the
+    source often italicizes only the book name and leaves the "1 " / "2 " in
+    plain text ("2 <i>Pt</i> 3:13"), so ``<i>Pt</i>`` on its own must still be
+    recognized as scripture rather than treated as a one-letter work title.
+    """
+    if not token:
+        return False
+    t = token.strip().rstrip(".")
+    if t in _ABBREV:
+        return True
+    return any(f"{n} {t}" in _ABBREV for n in ("1", "2", "3"))
+
+
 def parse_refs(text: str) -> list[ScriptureRef]:
     """Extract all biblical references from ``text``, in order of appearance."""
     refs: list[ScriptureRef] = []

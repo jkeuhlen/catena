@@ -10,6 +10,9 @@ dependencies = [
     "lxml>=5.2",
     "networkx>=3.3",
     "numpy>=2.4.6",
+    # networkx.spring_layout switches to a scipy-backed sparse solver above ~500
+    # nodes; the corpus crossed that threshold, so scipy is now required at build.
+    "scipy>=1.13",
 ]
 
 [project.scripts]

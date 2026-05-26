@@ -32,10 +32,14 @@ _TYPE_PATTERNS: list[tuple[str, str]] = [
     ("Apostolic Constitution", "Apostolic Constitution"),
     ("Post-Synodal Apostolic Exhortation", "Apostolic Exhortation"),
     ("Apostolic Exhortation", "Apostolic Exhortation"),
-    ("Apostolic Exaltation", "Apostolic Exhortation"),  # recurring source typo
+    ("Apostolic Exaltation", "Apostolic Exhortation"),    # recurring source typo
+    ("Aposotolic Exhortation", "Apostolic Exhortation"),  # …and another
     ("Apostolic Letter", "Apostolic Letter"),
     ("Pastoral Letter", "Pastoral Letter"),
     ("Encyclical Letter", "Encyclical"),
+    ("Encyclical Epistle", "Encyclical"),    # older curial phrasing
+    ("Encyc. Letter", "Encyclical"),         # abbreviation in pre-2000 notes
+    ("Encyc.letter", "Encyclical"),          # …sometimes without the space
     ("Encyclical", "Encyclical"),
     ("Motu Proprio", "Motu Proprio"),
     ("Radio Message", "Message"),
@@ -94,13 +98,13 @@ def recase_name(name: str) -> str:
 
 def normalize_author(raw: str) -> tuple[str, str]:
     """Return ``(key, display)`` for a person/body named in a citation."""
-    display = re.sub(r"\s+", " ", raw).strip().strip(",.")
+    display = re.sub(r"\s+", " ", raw).strip().strip(",.").strip()
     key = display.lower()
     for h in _HONORIFICS:
         # remove honorific tokens wherever they lead the name
         key = re.sub(rf"^{re.escape(h)}\s+", "", key)
-    key = re.sub(r"[^a-z0-9 ]", "", key).strip()
-    key = re.sub(r"\s+", " ", key)
+    key = re.sub(r"[^a-z0-9 ]", "", key)
+    key = re.sub(r"\s+", " ", key).strip()
     return key or display.lower(), recase_name(display)
 
 
@@ -109,10 +113,18 @@ def detect_type(text: str) -> tuple[str | None, int]:
 
     Returns ``(canonical_type, index)`` where ``index`` is the character offset
     of the match (``-1`` if none found), useful for splitting author from title.
+
+    Multi-word phrases ("Encyclical Letter", "Pastoral Constitution") match
+    case-insensitively — legacy notes lowercase them — while short single words
+    ("Letter", "Message", "Bull") stay case-sensitive so the English words
+    "letter"/"message" in prose don't false-match. "Encyclical" is long and
+    unambiguous enough to also be case-insensitive — that catches the recurring
+    legacy pattern "<Pope>'s encyclical <Title>".
     """
     best: tuple[str | None, int] = (None, -1)
     for phrase, canonical in _TYPE_PATTERNS:
-        m = re.search(rf"\b{re.escape(phrase)}\b", text)
+        flags = re.IGNORECASE if (" " in phrase or "." in phrase or phrase == "Encyclical") else 0
+        m = re.search(rf"\b{re.escape(phrase)}\b", text, flags)
         if m and (best[1] == -1 or m.start() < best[1]):
             best = (canonical, m.start())
     return best
@@ -140,12 +152,14 @@ def doc_key_from_url(url: str) -> str:
 
     Uses the final path segment's stem with any trailing language suffix
     removed, e.g. ``vat-ii_const_19651207_gaudium-et-spes`` for any language
-    edition of Gaudium et Spes.
+    edition of Gaudium et Spes. Also collapses the ``_cons_`` typo (seen on
+    one Gaudium et Spes URL) onto the standard ``_const_`` form.
     """
     path = urlparse(url).path
     stem = path.rsplit("/", 1)[-1]
     stem = re.sub(r"\.(html?|HTML?)$", "", stem)
     stem = _LANG_SUFFIX.sub("", stem)
+    stem = re.sub(r"(?<=vat-ii)_cons_", "_const_", stem, flags=re.IGNORECASE)
     return f"doc:{stem.lower()}"
 
 

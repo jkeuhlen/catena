@@ -422,16 +422,27 @@ function showDetail(n) {
 
   const meta = document.getElementById("detail-meta");
   meta.innerHTML = "";
-  const cited = edges.filter((e) => e.target === n.id && e.type === "cites").length;
+  // Incoming citations: documents are cited via "cites"; scripture via
+  // "cites_scripture". Edge weight is the citing-side multiplicity (e.g. one
+  // encyclical referring to a passage in three different footnotes → weight 3),
+  // so the source count and total can differ.
+  const incomingType = n.type === "scripture" ? "cites_scripture" : "cites";
+  const incoming = edges.filter((e) => e.target === n.id && e.type === incomingType);
+  const citedBy = incoming.length;
+  const citedTimes = incoming.reduce((s, e) => s + (e.weight || 1), 0);
   const cites = edges.filter((e) => e.source === n.id && e.type === "cites").length;
+  const unit = n.type === "scripture" ? "encyclical" : "work";
   const rows = [];
   if (n.type === "document" && n.author) rows.push(["Author", n.author]);
   if (n.type === "document" && n.date) rows.push(["Promulgated", n.date]);
   if (n.type === "scripture") rows.push(["Testament", n.testament === "OT" ? "Old Testament" : "New Testament"]);
   if (n.type === "author") rows.push(["Works in view", String(adj.get(n.id).size)]);
-  if (cited) rows.push(["Cited by", `${cited} work${cited > 1 ? "s" : ""}`]);
+  if (citedBy) rows.push(["Cited by",
+    citedTimes === citedBy
+      ? `${citedBy} ${unit}${citedBy > 1 ? "s" : ""}`
+      : `${citedBy} ${unit}${citedBy > 1 ? "s" : ""} (${citedTimes} citations)`]);
   if (cites) rows.push(["References", `${cites} work${cites > 1 ? "s" : ""}`]);
-  if (n.type === "document" && !n.in_corpus && !cited) rows.push(["Status", "Referenced"]);
+  if (n.type === "document" && !n.in_corpus && !citedBy) rows.push(["Status", "Referenced"]);
   for (const [k, v] of rows) {
     const div = document.createElement("div");
     div.innerHTML = `<dt>${k}</dt><dd>${v}</dd>`;

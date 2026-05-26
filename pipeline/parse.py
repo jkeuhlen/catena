@@ -3,7 +3,8 @@
 Extracts the document's own metadata (pope, title, type, date, canonical URL)
 and walks its footnotes into structured citations, plus all inline scripture
 references. The Vatican HTML is a Word export: footnotes are
-``<p class="MsoFootnoteText">`` blocks, each led by ``<a name="_ftnN">``.
+``<p class="MsoFootnoteText">`` blocks, each led by ``<a name="_ftnN">`` (older
+texts use *endnotes* with the ``_edn`` prefix instead — handled identically).
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from . import normalize, scripture, works
 
 # Italic tokens that are never a work title (citation apparatus, not works).
-_NOT_A_TITLE = re.compile(r"^(ibid|op\.?\s*cit|loc\.?\s*cit|AAS|cf)\b", re.IGNORECASE)
+# "Ep" / "Hom" are the Latin work-form abbreviations (Epistula, Homilia) that
+# show up italicized in patristic citations like "Ep. 204, 5: CSEL 57, 320" —
+# the work is identified by author + number, not a real title.
+_NOT_A_TITLE = re.compile(r"^(ibid|op\.?\s*cit|loc\.?\s*cit|AAS|cf|ep|hom)\b", re.IGNORECASE)
 _IBID = re.compile(r"\bibid\b", re.IGNORECASE)
 # "ibid." → the *same work* as the previous footnote; "idem"/"id." → the *same
 # author* but (usually) a new work. Both are apparatus, never a person's name.
@@ -124,6 +128,18 @@ def _author_type(prefix: str) -> tuple[str | None, str | None, str | None]:
     (e.g. "Encyclical Letter …"), there is no named author.
     """
     prefix = _clean_lead(prefix)
+    # Conciliar-session apparatus ("Sess. IV", "Session VI") is location, not author.
+    prefix = re.sub(r"^\s*Sess(?:\.|ion)?\s+[IVXLCDM\d]+[,.\s]*", "", prefix, flags=re.IGNORECASE)
+    # A semicolon in a citation tail almost always introduces a second cited work
+    # ("Work1; Author2, Work2") or apparatus ("can. 394; Code of Canons of the
+    # Eastern Churches"); keep only what precedes it so the second author / title
+    # doesn't leak into the first citation. Real personal names never contain ";".
+    prefix = prefix.split(";", 1)[0].strip()
+    # Strip a trailing scholarly-source locator ("…AAS 23 (1931) 221 et seq",
+    # "…PG 32, 972", "CSEL 57"); these are reference apparatus, not author names.
+    prefix = re.sub(
+        r"[,;\s]+(?:AAS|PG|PL|CSEL|CCL|CCSL|DS|SC|LCC)\s+\d.*$", "", prefix
+    ).strip()
     canonical_type, type_idx = normalize.detect_type(prefix)
     if type_idx > 0:
         author_raw = prefix[:type_idx]
@@ -134,6 +150,8 @@ def _author_type(prefix: str) -> tuple[str | None, str | None, str | None]:
     author_raw = author_raw.strip().strip(",").strip()
     # a title fragment ("…, A Pastoral Letter") can leave a dangling article
     author_raw = re.sub(r",\s*(?:[a-z]|an|the)$", "", author_raw, flags=re.IGNORECASE).strip()
+    # legacy "<Pope>'s encyclical letter <Title>" leaves a trailing possessive
+    author_raw = re.sub(r"['’]s$", "", author_raw).strip()
     if not author_raw or len(author_raw) > 80:
         return None, None, canonical_type
     key, display = normalize.normalize_author(author_raw)
@@ -143,13 +161,22 @@ def _author_type(prefix: str) -> tuple[str | None, str | None, str | None]:
 def _first_title(p: Tag) -> str | None:
     for i in p.find_all("i"):
         t = i.get_text(" ", strip=True)
-        if t and not _NOT_A_TITLE.match(t):
+        # Source markup sometimes italicizes the trailing comma/period along with
+        # the title ("<i>Iura et Bona,</i>"); also CamelCase artifacts from lost
+        # spaces ("Gaudium etSpes", "QuadragesimoAnno") — split before further use.
+        t = re.sub(r"([a-zà-ÿ])([A-ZÀ-Ý])", r"\1 \2", t).rstrip(",.;:")
+        # A real title has at least one letter (rejects stray italicized commas).
+        # An italicized scripture sigil ("Ps", "Gen") is a reference, not a title —
+        # crucial for legacy notes, which are largely bare scripture citations.
+        if (t and re.search(r"[A-Za-zÀ-ÿ]", t)
+                and not _NOT_A_TITLE.match(t)
+                and not scripture.is_book(t)):
             return t
     return None
 
 
 def _footnote_number(p: Tag) -> int | None:
-    back = p.find("a", href=re.compile(r"^#_ftnref\d+"))
+    back = p.find("a", href=re.compile(r"^#_(?:ftn|edn)ref\d+"))
     if not isinstance(back, Tag):
         return None
     href = back.get("href", "")
@@ -158,12 +185,13 @@ def _footnote_number(p: Tag) -> int | None:
 
 
 def _strip_marker(text: str, number: int) -> str:
-    """Remove a leading footnote marker, tolerating malformed brackets.
+    """Remove a leading note marker, tolerating the many styles across eras.
 
-    The Vatican HTML occasionally drops a bracket ("185]" instead of "[185]"),
-    so we strip the known footnote number with optional surrounding brackets.
+    Modern footnotes use "[N]" (and occasionally the malformed "185]" with a
+    dropped bracket); legacy notes use "(N)", "N)." or a bare "N." instead. We
+    strip the known number with optional surrounding bracket/parenthesis.
     """
-    return re.sub(rf"^\s*\[?\s*{number}\s*\]?[.\s]*", "", text)
+    return re.sub(rf"^\s*[\[(]?\s*{number}\s*[\])]?[.\s]*", "", text)
 
 
 def _prefix_before_first_doclink(p: Tag) -> str | None:
@@ -185,17 +213,20 @@ def _prefix_before_first_doclink(p: Tag) -> str | None:
     return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
-def _parse_footnote(p: Tag, prev: Citation | None) -> tuple[list[Citation], Citation | None]:
-    """Parse one footnote, given the previous primary citation for ibid. resolution.
+def _parse_note(number: int, p: Tag, prev: Citation | None) -> tuple[list[Citation], Citation | None]:
+    """Parse one note (foot- or endnote) given its number and the previous primary
+    citation for ibid. resolution.
 
     Returns ``(citations, new_prev)`` where ``new_prev`` is the primary citation
-    to carry forward (the work a following ``ibid.`` would refer to).
+    to carry forward (the work a following ``ibid.`` would refer to). The number is
+    passed in because the various note formats locate it differently (an anchor's
+    name, a back-link href, or a leading "(N)"/"N)." text marker).
     """
-    number = _footnote_number(p)
-    if number is None:
-        return [], prev
-
     text = _strip_marker(p.get_text(" ", strip=True), number)
+    # Legacy splitting consumes the bare note number but can leave its orphan
+    # punctuation ("N." → ". Leo XIII…"); drop it so "cf." stripping and author
+    # detection see a clean lead.
+    text = re.sub(r"^[\s.)\]]+", "", text)
     is_ibid = bool(_IBID_LEAD.match(text))    # same work
     is_idem = bool(_IDEM_LEAD.match(text))    # same author, new work
     links = _document_links(p)
@@ -260,7 +291,15 @@ def _parse_footnote(p: Tag, prev: Citation | None) -> tuple[list[Citation], Cita
 
     # A work without an online edition (a saint, a council, an old text).
     title = _first_title(p)
-    if title and (author or doc_type):
+    # If the candidate "author" is just the same text we picked as the title,
+    # the footnote really named only a work ("Cf. <i>Title</i>, …") — there is
+    # no author, not the title-as-author. works.py can still supply one later.
+    if author and title and author.strip().lower() == title.strip().lower():
+        author, author_key = None, None
+    # Emit any real title even without an author or type — bare "Cf. <i>Title</i>"
+    # is common, and works.py / the title-index will attach the right identity if
+    # the work is known.
+    if title:
         slug = re.sub(r"[^a-z0-9]+", "-", f"{author_key or ''} {title}".lower()).strip("-")
         cite = Citation(
             footnote=number,
@@ -330,7 +369,7 @@ def _parse_metadata(soup: BeautifulSoup, source_url: str) -> dict:
             if title.startswith(phrase):
                 title = title[len(phrase):].strip()
                 break
-    title = title or base or raw_title
+    title = re.sub(r"\s+", " ", title or base or raw_title).strip()
 
     return {
         "source_url": source_url,
@@ -345,28 +384,135 @@ def _parse_metadata(soup: BeautifulSoup, source_url: str) -> dict:
     }
 
 
+# --- note collection across the eras of Vatican HTML ---------------------------
+# A "note block" is a (number, <p>) pair the shared parser can read. Modern pages
+# anchor each note (_ftn/_edn); pre-2000 pages don't, so we fall back to splitting
+# the post-<hr> notes region on its ascending note numbers (see _legacy_notes).
+
+
+def _anchor_notes(soup: BeautifulSoup) -> list[tuple[int, Tag]]:
+    """Modern foot-/endnotes: bodies marked by a back-link anchor (name="_ftnN" /
+    "_ednN", href="#_ftnrefN" / "#_ednrefN"). Older pages wrap each in
+    <p class="MsoFootnoteText">; newer ones use a bare <p>. Most JP2 / Benedict
+    pages use *endnotes* (_edn) — same structure, different prefix. Select by the
+    anchor, not the class."""
+    out: list[tuple[int, Tag]] = []
+    seen: set[int] = set()
+    for a in soup.find_all("a", attrs={"name": re.compile(r"^_(?:ftn|edn)\d+$")}):
+        href = a.get("href", "")
+        if not (isinstance(href, str) and href.startswith(("#_ftnref", "#_ednref"))):
+            continue
+        block = a.find_parent("p") or a.parent
+        if not isinstance(block, Tag) or id(block) in seen:
+            continue
+        seen.add(id(block))
+        number = _footnote_number(block)
+        if number is not None:
+            out.append((number, block))
+    return out
+
+
+# A note-number bookmark anchor in legacy pages: <a name="$N">/<a href="#-N">…</a>
+# (the "$" is URL-encoded as %24). Its visible text is the note number — collapse
+# it to bare text so the number joins the marker stream below.
+_NOTE_ANCHOR = re.compile(r'<a\b[^>]*(?:name="[^"]*"|href="#[^"]*")[^>]*>\s*(\d*)\s*</a>')
+# Where the notes region gives way to page chrome.
+_REGION_END = re.compile(r"<footer\b|<!--\s*END:\s*body|Copyright\s*(?:©|&copy;|&#169;)", re.I)
+# Tags after which a number at the start of the next text is a note marker.
+_BLOCK_TAG = re.compile(r"^<\s*/?\s*(?:p|br|div|hr|td|tr|table|li|font)\b", re.I)
+
+
+def _notes_region_html(html: str) -> str:
+    """Raw HTML of the notes section: everything after the last <hr>, before the
+    page footer. Every pre-2000 encyclical separates its notes with a single <hr>."""
+    i = html.rfind("<hr")
+    if i == -1:
+        return ""
+    region = html[html.find(">", i) + 1:]
+    return _REGION_END.split(region, maxsplit=1)[0]
+
+
+def _match_marker(text: str, want: int, at_boundary: bool):
+    """Match the marker for note ``want`` in ``text``: either a number at a block
+    boundary (start of a <p>/after a <br> — covers "(N)", "N).", "N." and the bare
+    bookmark number) or a "N ." / "N )" with a space before the punctuation (covers
+    notes crammed into one <p>). The space rule keeps locators like "22." — no
+    space — from being mistaken for a marker. A boundary marker tolerates a stray
+    leading section number ("14. (6)…" seen in Populorum Progressio)."""
+    if at_boundary:
+        m = re.match(rf"\s*(?:\d{{1,3}}[.)]\s+)?\(?\s*{want}\s*\)?\s*\.?(?!\d)", text)
+        if m and re.search(rf"(?<!\d){want}(?!\d)", m.group()):
+            return m
+    return re.search(rf"(?<![\d.]){want}\s+[).]", text)
+
+
+def _legacy_notes(html: str) -> list[tuple[int, Tag]]:
+    """Pre-2000 encyclicals carry no note anchors. Slice the post-<hr> notes region
+    and split it on the ascending note numbers — the one signal common to every
+    era's marker zoo — re-parsing each span into a <p> the shared parser can read."""
+    region = _NOTE_ANCHOR.sub(r" \1 ", _notes_region_html(html))
+    if not region.strip():
+        return []
+    notes: list[tuple[int, Tag]] = []
+    cur: list[str] = []
+    cur_num: int | None = None
+    boundary = True
+
+    def emit() -> None:
+        if cur_num is None:
+            return
+        block = BeautifulSoup(f"<p>{''.join(cur)}</p>", "lxml").find("p")
+        if isinstance(block, Tag):
+            notes.append((cur_num, block))
+
+    for tok in re.split(r"(<[^>]+>)", region):
+        if not tok:
+            continue
+        if tok.startswith("<"):
+            if cur_num is not None:
+                cur.append(tok)
+            if _BLOCK_TAG.match(tok):
+                boundary = True
+            continue
+        if not tok.strip():
+            # whitespace between a <br>/<b> and the note number must not consume
+            # the boundary (else the number is read as body text, not a marker).
+            if cur_num is not None:
+                cur.append(tok)
+            continue
+        text, first = tok, True
+        while text:
+            want = cur_num + 1 if cur_num is not None else 1
+            m = _match_marker(text, want, boundary and first)
+            if not m:
+                if cur_num is not None:
+                    cur.append(text)
+                break
+            before = text[:m.start()]
+            if cur_num is not None and before.strip():
+                cur.append(before)
+            emit()
+            cur, cur_num = [], want
+            text, first = text[m.end():], False
+        boundary = False
+    emit()
+    return notes
+
+
+def _collect_notes(soup: BeautifulSoup, html: str) -> list[tuple[int, Tag]]:
+    """All notes as (number, block) pairs: modern anchors, else the legacy split."""
+    return _anchor_notes(soup) or _legacy_notes(html)
+
+
 def parse_document(html: str, source_url: str) -> ParsedDocument:
     soup = BeautifulSoup(html, "lxml")
     meta = _parse_metadata(soup, source_url)
 
-    # Footnote bodies are marked by a back-link anchor (name="_ftnN",
-    # href="#_ftnrefN"). Older pages wrap each in <p class="MsoFootnoteText">;
-    # newer ones use a bare <p>. Select by the anchor, not the class.
-    footnotes = []
-    seen: set[int] = set()
-    for a in soup.find_all("a", attrs={"name": re.compile(r"^_ftn\d+$")}):
-        href = a.get("href", "")
-        if not (isinstance(href, str) and href.startswith("#_ftnref")):
-            continue
-        block = a.find_parent("p") or a.parent
-        if block is None or id(block) in seen:
-            continue
-        seen.add(id(block))
-        footnotes.append(block)
+    notes = _collect_notes(soup, html)
     citations: list[Citation] = []
     prev: Citation | None = None
-    for p in footnotes:
-        cites, prev = _parse_footnote(p, prev)
+    for number, block in notes:
+        cites, prev = _parse_note(number, block, prev)
         citations.extend(cites)
     # map famous works onto their curated canonical identity (author + key)
     citations = [_canonicalize(c) for c in citations]
@@ -383,7 +529,7 @@ def parse_document(html: str, source_url: str) -> ParsedDocument:
 
     return ParsedDocument(
         **meta,
-        footnote_count=len(footnotes),
+        footnote_count=len(notes),
         citations=citations,
         scripture=list(counts.values()),
     )

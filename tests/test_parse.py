@@ -1,4 +1,4 @@
-from pipeline import graph, parse
+from pipeline import graph, parse, scripture
 
 # A minimal stand-in for the Vatican Word-export structure: a canonical link,
 # a title, an inline scripture ref, and three footnotes including an "ibid.".
@@ -91,6 +91,137 @@ def test_resilient_to_formatting_quirks():
     g = graph.build_graph([doc])
     author_labels = {n["label"] for n in g["nodes"] if n["type"] == "author"}
     assert author_labels == {"Francis"}
+
+
+# Older / JP2 / Benedict encyclicals use *endnotes* (_edn/_ednref anchors) rather
+# than footnotes (_ftn/_ftnref) — same structure, different prefix, and the inline
+# anchors carry their attributes in a different order (BeautifulSoup is order-agnostic).
+ENDNOTES = """
+<html><head>
+  <title>Caritas in Veritate (29 June 2009)</title>
+  <meta name="description" content="ENCYCLICAL LETTER CARITAS IN VERITATE OF THE SUPREME PONTIFF BENEDICT XVI"/>
+  <link rel="canonical" href="http://www.vatican.va/content/benedict-xvi/en/encyclicals/documents/hf_ben-xvi_enc_20090629_caritas-in-veritate.html"/>
+</head><body>
+  <p>Charity in truth<a title="" href="#_edn1" name="_ednref1">[1]</a> is the way.</p>
+  <p><a title="" href="#_ednref1" name="_edn1">[1]</a> Paul VI, Encyclical Letter
+     <a href="https://www.vatican.va/content/paul-vi/en/encyclicals/documents/hf_p-vi_enc_26031967_populorum.html"><i>Populorum Progressio</i></a>, 22.</p>
+  <p><a title="" href="#_ednref2" name="_edn2">[2]</a> Saint Augustine, <i>Confessions</i>, X, 27.</p>
+</body></html>
+"""
+ENDNOTES_URL = "https://www.vatican.va/content/benedict-xvi/en/encyclicals/documents/hf_ben-xvi_enc_20090629_caritas-in-veritate.html"
+
+
+def test_endnotes_parsed_like_footnotes():
+    doc = parse.parse_document(ENDNOTES, ENDNOTES_URL)
+    assert doc.footnote_count == 2
+    by_fn = {c.footnote: c for c in doc.citations}
+    # edn1: linked encyclical, author before the link
+    assert by_fn[1].author == "Paul VI"
+    assert by_fn[1].target_key == "doc:hf_p-vi_enc_26031967_populorum"
+    # edn2: a text-only work (no online edition)
+    assert by_fn[2].author == "Saint Augustine"
+    assert by_fn[2].title == "Confessions"
+
+
+# Pre-2000 encyclicals carry no note anchors at all: notes are plain <p> blocks
+# after an <hr>, numbered with "(N)" / "N)." / a bare "N." marker, and the bare
+# note number is often a separate element from its trailing punctuation. The
+# parser splits the post-<hr> region on the ascending note numbers.
+LEGACY = """
+<html><head>
+  <title>Rerum Novarum (May 15, 1891)</title>
+  <meta name="description" content="ENCYCLICAL LETTER RERUM NOVARUM OF THE SUPREME PONTIFF LEO XIII"/>
+  <link rel="canonical" href="http://www.vatican.va/content/leo-xiii/en/encyclicals/documents/hf_l-xiii_enc_15051891_rerum-novarum.html"/>
+</head><body>
+  <p>On the condition of labour (cf. <i>Deut</i> 5:21).</p>
+  <hr/>
+  <p>NOTES</p>
+  <p>(1) Cf. <i>Deut</i> 5:21.</p>
+  <p>(2) Saint Thomas Aquinas, <i>Summa Theologiae</i>, IIa-IIae, q. 10, art. 12.</p>
+  <p>(3) <b>3</b>. Leo XIII's encyclical letter <i>Immortale Dei</i>: Acta Leonis XIII, 5.</p>
+  <p>Copyright &copy; Dicastery for Communication</p>
+</body></html>
+"""
+LEGACY_URL = "https://www.vatican.va/content/leo-xiii/en/encyclicals/documents/hf_l-xiii_enc_15051891_rerum-novarum.html"
+
+
+def test_legacy_plaintext_notes():
+    doc = parse.parse_document(LEGACY, LEGACY_URL)
+    assert doc.title == "Rerum Novarum"
+    assert doc.doc_type == "Encyclical"
+    assert doc.footnote_count == 3            # split on the ascending markers
+    by_fn = {c.footnote: c for c in doc.citations}
+    # note 1 is a bare scripture reference — must not become a spurious "Deut" work
+    assert 1 not in by_fn
+    assert "Deuteronomy 5:21" in {s["cite"] for s in doc.scripture}
+    # note 2: a curated work, attributed via works.py despite no online edition
+    assert by_fn[2].author == "Saint Thomas Aquinas"
+    assert by_fn[2].title == "Summa Theologiae"
+    # note 3: possessive "Leo XIII's encyclical letter <Title>" → pope is the author,
+    # and a clean lead (no orphaned "3." marker leaking into the author)
+    assert by_fn[3].author == "Leo XIII"
+    assert by_fn[3].title == "Immortale Dei"
+    assert by_fn[3].doc_type == "Encyclical"
+
+
+# Italics inside footnotes regularly carry things that *look* like work titles
+# but aren't: a stray punctuation italic, a bare scripture-book suffix when the
+# "1 "/"2 " is left outside the <i>, and the Latin work-form abbreviations
+# "Ep."/"Hom." used to identify patristic letters by number rather than name.
+JUNK_TITLES = """
+<html><head>
+  <title>Test (1 January 2026)</title>
+  <link rel="canonical" href="http://www.vatican.va/test.html"/>
+</head><body>
+  <p class="MsoFootnoteText"><a name="_ftn1" href="#_ftnref1">[1]</a> Cf. Benedict XVI<i>,</i> Encyclical Letter Deus Caritas Est, 18.</p>
+  <p class="MsoFootnoteText"><a name="_ftn2" href="#_ftnref2">[2]</a> Cf. 2 <i>Pt</i> 3:13.</p>
+  <p class="MsoFootnoteText"><a name="_ftn3" href="#_ftnref3">[3]</a> Saint Augustine, <i>Ep</i>. 204, 5: CSEL 57, 320.</p>
+</body></html>
+"""
+
+def test_no_spurious_titles_from_stray_italics():
+    doc = parse.parse_document(JUNK_TITLES, "https://www.vatican.va/test.html")
+    titles = {c.title for c in doc.citations}
+    # the italicized comma is not a work
+    assert "," not in titles
+    # bare "<i>Pt</i>" is the scripture sigil for 1 / 2 Peter, not a work title
+    assert "Pt" not in titles
+    # "<i>Ep</i>." is the Latin abbreviation for Epistula, not a title
+    assert "Ep" not in titles
+    # is_book recognizes the bare suffix of a numbered book directly
+    assert scripture.is_book("Pt")
+    assert scripture.is_book("Cor")
+    assert not scripture.is_book("Foo")
+
+
+# Legacy notes leak scholarly-source locators (AAS, PG, CSEL…) and multi-citation
+# semicolon tails into the author field; titles arrive with stray punctuation and
+# lost CamelCase spaces from the source HTML.
+APPARATUS = """
+<html><head>
+  <title>Test (1 January 2026)</title>
+  <link rel="canonical" href="http://www.vatican.va/test.html"/>
+</head><body>
+  <p class="MsoFootnoteText"><a name="_ftn1" href="#_ftnref1">[1]</a> Pius XI's encyclical <i>Mit brennender Sorge</i>, AAS 29 (1937) 159, and his others.</p>
+  <p class="MsoFootnoteText"><a name="_ftn2" href="#_ftnref2">[2]</a> Saint Augustine, <i>De Trinitate</i>, X, 27: PL 42, 994; cf. Saint Thomas Aquinas, <i>Summa Theologiae</i>.</p>
+  <p class="MsoFootnoteText"><a name="_ftn3" href="#_ftnref3">[3]</a> Pius XII, Address, <i>Iura et Bona,</i> 5.</p>
+  <p class="MsoFootnoteText"><a name="_ftn4" href="#_ftnref4">[4]</a> Cf. <i>QuadragesimoAnno</i> 14.</p>
+</body></html>
+"""
+
+def test_author_apparatus_and_title_cleanup():
+    doc = parse.parse_document(APPARATUS, "https://www.vatican.va/test.html")
+    by_fn = {c.footnote: c for c in doc.citations}
+    # fn1: AAS apparatus stripped; possessive "Pius XI's" → "Pius XI"
+    assert by_fn[1].author == "Pius XI"
+    # fn2: the semicolon tail is dropped — fn2 attributes only the first work
+    assert by_fn[2].author == "Saint Augustine"
+    assert by_fn[2].title == "De Trinitate"
+    # fn3: trailing comma stripped from the italicized title
+    assert by_fn[3].title == "Iura et Bona"
+    # fn4: a lost CamelCase space is restored, and the title-index then dedupes
+    # it onto the existing "Quadragesimo Anno" seed
+    assert by_fn[4].title == "Quadragesimo Anno"
 
 
 def test_curated_work_canonicalization():

@@ -32,24 +32,55 @@ _WORKS_RAW: list[tuple[str, str, str]] = [
     ("summa contra gentiles",     "Summa contra Gentiles",       "Saint Thomas Aquinas"),
     ("scriptum super sententiis", "Scriptum super Sententiis",   "Saint Thomas Aquinas"),
     ("super boetium de trinitate", "Super Boetium de Trinitate", "Saint Thomas Aquinas"),
+    ("contra impugnantes",        "Contra impugnantes Dei cultum et religionem", "Saint Thomas Aquinas"),
+    ("de regimine principum",     "De Regimine Principum",       "Saint Thomas Aquinas"),
+    ("summa th",                  "Summa Theologiae",            "Saint Thomas Aquinas"),  # "Summa Th." abbrev
     # Augustine
     ("de civitate dei",           "De Civitate Dei",             "Saint Augustine"),
     ("city of god",               "De Civitate Dei",             "Saint Augustine"),
     ("confession",                "Confessions",                 "Saint Augustine"),
     ("enarrationes in psalmos",   "Enarrationes in Psalmos",     "Saint Augustine"),
     ("de doctrina christiana",    "De Doctrina Christiana",      "Saint Augustine"),
+    ("in iohannis evangelium tractatus", "In Iohannis Evangelium Tractatus", "Saint Augustine"),
+    ("tract in ioannem",          "In Iohannis Evangelium Tractatus", "Saint Augustine"),
+    ("tract in joannem",          "In Iohannis Evangelium Tractatus", "Saint Augustine"),
     # Other Fathers & Doctors
     ("adversus haereses",         "Adversus Haereses",           "Saint Irenaeus of Lyons"),
     ("homiliae in matthaeum",     "Homilies on the Gospel of Matthew", "Saint John Chrysostom"),
+    ("in io homil",               "Homilies on the Gospel of John", "Saint John Chrysostom"),
     ("de lazaro",                 "De Lazaro",                   "Saint John Chrysostom"),
     ("regula pastoralis",         "Regula Pastoralis",           "Saint Gregory the Great"),
+    ("moralia in job",            "Moralia in Job",              "Saint Gregory the Great"),
     ("divinae institutiones",     "Divinae Institutiones",       "Lactantius"),
+    ("in joh",                    "Commentary on the Gospel of John", "Origen"),
+    ("in num homil",              "Homilies on Numbers",         "Origen"),
+    ("hexaemeron",                "Hexaemeron",                  "Saint Basil the Great"),
+    ("expositio evangelii secundum lucam", "Expositio Evangelii secundum Lucam", "Saint Ambrose"),
+    ("exameron",                  "Exameron",                    "Saint Ambrose"),  # CSEL 32, distinct from Basil's Greek Hexaemeron
+    ("in matthaeum",              "Homilies on the Gospel of Matthew", "Saint John Chrysostom"),  # PG 57/58
+    ("de hominis opificio",       "De Hominis Opificio",         "Saint Gregory of Nyssa"),  # PG 44
+    ("apologeticum",              "Apologeticum",                "Tertullian"),  # PL 1
     # Franciscan sources
     ("admonitions",               "Admonitions",                 "Saint Francis of Assisi"),
     ("regula non bullata",        "Earlier Rule (Regula non bullata)", "Saint Francis of Assisi"),
     ("earlier rule",              "Earlier Rule (Regula non bullata)", "Saint Francis of Assisi"),
-    # Classical
+    ("major legend of saint francis", "The Major Legend of Saint Francis", "Saint Bonaventure"),
+    ("in ii sent",                "Commentary on the Sentences", "Saint Bonaventure"),
+    # Conciliar / magisterial title aliases — collapse text-only variants onto the
+    # canonical Latin title (graph._title_index then merges them onto any
+    # URL-backed node sharing that title).
+    ("on the condition of",       "Rerum Novarum",               "Leo XIII"),
+    ("pastoral constitution on the church in", "Gaudium et Spes", "Second Vatican Ecumenical Council"),
+    ("dei verbum",                "Dei Verbum",                  "Second Vatican Ecumenical Council"),
+    ("familiaris consortio",      "Familiaris Consortio",        "John Paul II"),
+    ("donum vitae",               "Donum Vitae",                 "Congregation for the Doctrine of the Faith"),
+    ("immortale dei",             "Immortale Dei",               "Leo XIII"),
+    ("das ende der neuzeit",      "Das Ende der Neuzeit",        "Romano Guardini"),
+    # Classical & literary
     ("aeneid",                    "Aeneid",                      "Virgil"),
+    ("divine comedy",             "The Divine Comedy",           "Dante Alighieri"),
+    ("the demons",                "The Demons",                  "Fyodor Dostoevsky"),
+    ("jenseits von gut und b",    "Jenseits von Gut und Böse",   "Friedrich Nietzsche"),
 ]
 
 

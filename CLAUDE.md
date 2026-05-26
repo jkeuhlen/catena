@@ -73,9 +73,24 @@ URL-backed nodes by normalized title (`graph.py`).
 Vatican pages are Word HTML exports. Footnotes are the data; the markup is messy
 and varies by era. Key facts learned the hard way:
 
-- **Footnote bodies** are `<p>` blocks each containing a back-link anchor
-  `<a name="_ftnN" href="#_ftnrefN">`. Older pages add `class="MsoFootnoteText"`;
-  Francis-era pages use a bare `<p>`. **Select by the anchor, not the class.**
+- **Notes come in three eras** (`_collect_notes` picks the scheme):
+  - **Modern (anchored)**: `<p>` blocks each containing a back-link anchor
+    `<a name="_ftnN" href="#_ftnrefN">`. Older pages add `class="MsoFootnoteText"`;
+    Francis-era pages use a bare `<p>`. **Select by the anchor, not the class.**
+    Benedict/JP2 *endnotes* are identical but with the `_edn`/`_ednref` prefix.
+  - **Pre-2000 (anchorless)**: Leo XIII → John Paul II ship notes as plain text
+    after a single `<hr>`, in a marker zoo — `(N)`, `N).`, bare `N.`, `N .`
+    crammed into one `<p>`, or a defunct `<a name="$N">` bookmark (the `$` is
+    URL-encoded `%24`, the counter is non-decimal & its link text is unreliable).
+    `_legacy_notes` ignores all that and **splits the post-`<hr>` region on the
+    ascending note numbers** — the one signal common to every era. A marker is a
+    number at a block boundary (start of `<p>`/after `<br>`) or one with a space
+    before its `.`/`)` ("22." with no space is a *locator*, not a marker). It
+    tolerates a stray leading section number ("14. (6)…", Populorum). The bare
+    number and its punctuation are often separate elements, so the per-note text
+    can start with an orphan ". "/") " — stripped in `_parse_note`.
+  - Scripture-only notes ("Cf. *Gen* 1:28") must **not** become works: an
+    italicized book sigil is rejected via `scripture.is_book` in `_first_title`.
 - **Author lives *before the first link*.** When a footnote links to a work, the
   link text is the title, so the author is whatever text precedes that link
   (often nothing). Parsing author from the whole footnote text was the source of
@@ -148,9 +163,17 @@ has a `.class { display: … }` needs an explicit `.class[hidden] { display: non
   *they* cite aren't crawled recursively yet (the obvious next big feature).
 - **Multi-citation footnotes**: a footnote citing several works attributes them
   all to the first author (real authorship is recovered when a work is parsed
-  directly or via `works.py`).
+  directly or via `works.py`). In the anchorless legacy notes this also leaves
+  some apparatus tails as authors ("…AAS 60 (1968), 485-487; Benedict XVI").
 - **Prose-prefixed footnotes** (e.g. "In these considerations… cf. X") and exotic
   citations (a film) can still mis-parse — rare, peripheral, left as-is.
+- **Under-attributed patristic works** in legacy notes cited with no author and
+  only a Latin sigil + PG/CCL locator ("In Matthaeum", "In Epistulam ad Romanos")
+  surface as their own title-as-author nodes; attribute the famous ones case by
+  case in `works.py` (needs the PG/source number to be sure — don't guess).
+- The build needs **scipy** (`networkx.spring_layout` switches to a sparse solver
+  above ~500 nodes). `compute_layout` runs ~30 s at ~1.9k nodes (build-time only);
+  lower `iterations` in `layout.py` if it gets painful.
 - Not yet: papalencyclicals.net adapter for older texts; graph analytics
   (centrality/lineage); per-document pages; Cloudflare deploy.
 
