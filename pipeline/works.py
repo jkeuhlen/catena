@@ -23,64 +23,67 @@ class Work:
     title: str       # canonical display title
     author: str      # canonical author (display form)
     key: str         # stable node id, independent of how the work was cited
+    doc_type: str    # the kind of work — overwrites any stale type a citing
+                     # footnote left on the citation (see ``parse._canonicalize``).
+                     # Required: omitting it would re-open the doc_type-carryover bug.
 
 
-# (substring matched against the normalized title, canonical title, author)
-_WORKS_RAW: list[tuple[str, str, str]] = [
-    # Thomas Aquinas
-    ("summa theolog",             "Summa Theologiae",            "Saint Thomas Aquinas"),
-    ("summa contra gentiles",     "Summa contra Gentiles",       "Saint Thomas Aquinas"),
-    ("scriptum super sententiis", "Scriptum super Sententiis",   "Saint Thomas Aquinas"),
-    ("super boetium de trinitate", "Super Boetium de Trinitate", "Saint Thomas Aquinas"),
-    ("contra impugnantes",        "Contra impugnantes Dei cultum et religionem", "Saint Thomas Aquinas"),
-    ("de regimine principum",     "De Regimine Principum",       "Saint Thomas Aquinas"),
-    ("summa th",                  "Summa Theologiae",            "Saint Thomas Aquinas"),  # "Summa Th." abbrev
+# (substring matched against the normalized title, canonical title, author, doc_type)
+_WORKS_RAW: list[tuple[str, str, str, str]] = [
+    # Thomas Aquinas — scholastic
+    ("summa theolog",             "Summa Theologiae",            "Saint Thomas Aquinas", "Scholastic treatise"),
+    ("summa contra gentiles",     "Summa contra Gentiles",       "Saint Thomas Aquinas", "Scholastic treatise"),
+    ("scriptum super sententiis", "Scriptum super Sententiis",   "Saint Thomas Aquinas", "Commentary"),
+    ("super boetium de trinitate", "Super Boetium de Trinitate", "Saint Thomas Aquinas", "Commentary"),
+    ("contra impugnantes",        "Contra impugnantes Dei cultum et religionem", "Saint Thomas Aquinas", "Treatise"),
+    ("de regimine principum",     "De Regimine Principum",       "Saint Thomas Aquinas", "Treatise"),
+    ("summa th",                  "Summa Theologiae",            "Saint Thomas Aquinas", "Scholastic treatise"),  # "Summa Th." abbrev
     # Augustine
-    ("de civitate dei",           "De Civitate Dei",             "Saint Augustine"),
-    ("city of god",               "De Civitate Dei",             "Saint Augustine"),
-    ("confession",                "Confessions",                 "Saint Augustine"),
-    ("enarrationes in psalmos",   "Enarrationes in Psalmos",     "Saint Augustine"),
-    ("de doctrina christiana",    "De Doctrina Christiana",      "Saint Augustine"),
-    ("in iohannis evangelium tractatus", "In Iohannis Evangelium Tractatus", "Saint Augustine"),
-    ("tract in ioannem",          "In Iohannis Evangelium Tractatus", "Saint Augustine"),
-    ("tract in joannem",          "In Iohannis Evangelium Tractatus", "Saint Augustine"),
+    ("de civitate dei",           "De Civitate Dei",             "Saint Augustine", "Theological treatise"),
+    ("city of god",               "De Civitate Dei",             "Saint Augustine", "Theological treatise"),
+    ("confession",                "Confessions",                 "Saint Augustine", "Spiritual autobiography"),
+    ("enarrationes in psalmos",   "Enarrationes in Psalmos",     "Saint Augustine", "Scripture commentary"),
+    ("de doctrina christiana",    "De Doctrina Christiana",      "Saint Augustine", "Theological treatise"),
+    ("in iohannis evangelium tractatus", "In Iohannis Evangelium Tractatus", "Saint Augustine", "Scripture commentary"),
+    ("tract in ioannem",          "In Iohannis Evangelium Tractatus", "Saint Augustine", "Scripture commentary"),
+    ("tract in joannem",          "In Iohannis Evangelium Tractatus", "Saint Augustine", "Scripture commentary"),
     # Other Fathers & Doctors
-    ("adversus haereses",         "Adversus Haereses",           "Saint Irenaeus of Lyons"),
-    ("homiliae in matthaeum",     "Homilies on the Gospel of Matthew", "Saint John Chrysostom"),
-    ("in io homil",               "Homilies on the Gospel of John", "Saint John Chrysostom"),
-    ("de lazaro",                 "De Lazaro",                   "Saint John Chrysostom"),
-    ("regula pastoralis",         "Regula Pastoralis",           "Saint Gregory the Great"),
-    ("moralia in job",            "Moralia in Job",              "Saint Gregory the Great"),
-    ("divinae institutiones",     "Divinae Institutiones",       "Lactantius"),
-    ("in joh",                    "Commentary on the Gospel of John", "Origen"),
-    ("in num homil",              "Homilies on Numbers",         "Origen"),
-    ("hexaemeron",                "Hexaemeron",                  "Saint Basil the Great"),
-    ("expositio evangelii secundum lucam", "Expositio Evangelii secundum Lucam", "Saint Ambrose"),
-    ("exameron",                  "Exameron",                    "Saint Ambrose"),  # CSEL 32, distinct from Basil's Greek Hexaemeron
-    ("in matthaeum",              "Homilies on the Gospel of Matthew", "Saint John Chrysostom"),  # PG 57/58
-    ("de hominis opificio",       "De Hominis Opificio",         "Saint Gregory of Nyssa"),  # PG 44
-    ("apologeticum",              "Apologeticum",                "Tertullian"),  # PL 1
+    ("adversus haereses",         "Adversus Haereses",           "Saint Irenaeus of Lyons", "Theological treatise"),
+    ("homiliae in matthaeum",     "Homilies on the Gospel of Matthew", "Saint John Chrysostom", "Homilies"),
+    ("in io homil",               "Homilies on the Gospel of John", "Saint John Chrysostom", "Homilies"),
+    ("de lazaro",                 "De Lazaro",                   "Saint John Chrysostom", "Homilies"),
+    ("regula pastoralis",         "Regula Pastoralis",           "Saint Gregory the Great", "Pastoral treatise"),
+    ("moralia in job",            "Moralia in Job",              "Saint Gregory the Great", "Scripture commentary"),
+    ("divinae institutiones",     "Divinae Institutiones",       "Lactantius", "Apologetic treatise"),
+    ("in joh",                    "Commentary on the Gospel of John", "Origen", "Scripture commentary"),
+    ("in num homil",              "Homilies on Numbers",         "Origen", "Homilies"),
+    ("hexaemeron",                "Hexaemeron",                  "Saint Basil the Great", "Homilies"),
+    ("expositio evangelii secundum lucam", "Expositio Evangelii secundum Lucam", "Saint Ambrose", "Scripture commentary"),
+    ("exameron",                  "Exameron",                    "Saint Ambrose", "Homilies"),  # CSEL 32, distinct from Basil's Greek Hexaemeron
+    ("in matthaeum",              "Homilies on the Gospel of Matthew", "Saint John Chrysostom", "Homilies"),  # PG 57/58
+    ("de hominis opificio",       "De Hominis Opificio",         "Saint Gregory of Nyssa", "Theological treatise"),  # PG 44
+    ("apologeticum",              "Apologeticum",                "Tertullian", "Apologetic treatise"),  # PL 1
     # Franciscan sources
-    ("admonitions",               "Admonitions",                 "Saint Francis of Assisi"),
-    ("regula non bullata",        "Earlier Rule (Regula non bullata)", "Saint Francis of Assisi"),
-    ("earlier rule",              "Earlier Rule (Regula non bullata)", "Saint Francis of Assisi"),
-    ("major legend of saint francis", "The Major Legend of Saint Francis", "Saint Bonaventure"),
-    ("in ii sent",                "Commentary on the Sentences", "Saint Bonaventure"),
+    ("admonitions",               "Admonitions",                 "Saint Francis of Assisi", "Spiritual writing"),
+    ("regula non bullata",        "Earlier Rule (Regula non bullata)", "Saint Francis of Assisi", "Religious rule"),
+    ("earlier rule",              "Earlier Rule (Regula non bullata)", "Saint Francis of Assisi", "Religious rule"),
+    ("major legend of saint francis", "The Major Legend of Saint Francis", "Saint Bonaventure", "Hagiography"),
+    ("in ii sent",                "Commentary on the Sentences", "Saint Bonaventure", "Commentary"),
     # Conciliar / magisterial title aliases — collapse text-only variants onto the
     # canonical Latin title (graph._title_index then merges them onto any
-    # URL-backed node sharing that title).
-    ("on the condition of",       "Rerum Novarum",               "Leo XIII"),
-    ("pastoral constitution on the church in", "Gaudium et Spes", "Second Vatican Ecumenical Council"),
-    ("dei verbum",                "Dei Verbum",                  "Second Vatican Ecumenical Council"),
-    ("familiaris consortio",      "Familiaris Consortio",        "John Paul II"),
-    ("donum vitae",               "Donum Vitae",                 "Congregation for the Doctrine of the Faith"),
-    ("immortale dei",             "Immortale Dei",               "Leo XIII"),
-    ("das ende der neuzeit",      "Das Ende der Neuzeit",        "Romano Guardini"),
+    # URL-backed node sharing that title; the seed's own doc_type wins there).
+    ("on the condition of",       "Rerum Novarum",               "Leo XIII", "Encyclical"),
+    ("pastoral constitution on the church in", "Gaudium et Spes", "Second Vatican Ecumenical Council", "Pastoral Constitution"),
+    ("dei verbum",                "Dei Verbum",                  "Second Vatican Ecumenical Council", "Dogmatic Constitution"),
+    ("familiaris consortio",      "Familiaris Consortio",        "John Paul II", "Apostolic Exhortation"),
+    ("donum vitae",               "Donum Vitae",                 "Congregation for the Doctrine of the Faith", "Instruction"),
+    ("immortale dei",             "Immortale Dei",               "Leo XIII", "Encyclical"),
+    ("das ende der neuzeit",      "Das Ende der Neuzeit",        "Romano Guardini", "Philosophical work"),
     # Classical & literary
-    ("aeneid",                    "Aeneid",                      "Virgil"),
-    ("divine comedy",             "The Divine Comedy",           "Dante Alighieri"),
-    ("the demons",                "The Demons",                  "Fyodor Dostoevsky"),
-    ("jenseits von gut und b",    "Jenseits von Gut und Böse",   "Friedrich Nietzsche"),
+    ("aeneid",                    "Aeneid",                      "Virgil", "Epic poem"),
+    ("divine comedy",             "The Divine Comedy",           "Dante Alighieri", "Epic poem"),
+    ("the demons",                "The Demons",                  "Fyodor Dostoevsky", "Novel"),
+    ("jenseits von gut und b",    "Jenseits von Gut und Böse",   "Friedrich Nietzsche", "Philosophical work"),
 ]
 
 
@@ -93,8 +96,8 @@ def _slug(s: str) -> str:
 
 
 _WORKS: list[tuple[str, Work]] = [
-    (pat, Work(title, author, f"doc:work:{_slug(title)}"))
-    for pat, title, author in _WORKS_RAW
+    (pat, Work(title, author, f"doc:work:{_slug(title)}", doc_type))
+    for pat, title, author, doc_type in _WORKS_RAW
 ]
 
 

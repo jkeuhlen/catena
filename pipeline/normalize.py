@@ -131,11 +131,18 @@ def detect_type(text: str) -> tuple[str | None, int]:
 
 
 def is_document_url(url: str) -> bool:
-    """True for vatican.va links that point at an actual magisterial document."""
+    """True for vatican.va links that point at an actual magisterial document.
+
+    Accepts both absolute (``https://www.vatican.va/...``) and relative
+    (``/content/...``) hrefs: Vatican footnotes routinely use relative paths,
+    and rejecting them silently drops the link, which forces the parser into
+    its link-less branch and mis-attributes the author (see the *Caritas in
+    Veritate* / "Benedict XVI, Christmas" regression).
+    """
     if not url:
         return False
     p = urlparse(url)
-    if "vatican.va" not in p.netloc:
+    if p.netloc and "vatican.va" not in p.netloc:
         return False
     path = p.path.lower()
     # Document pages end in .html/.htm and live under a documents/ or archive path.

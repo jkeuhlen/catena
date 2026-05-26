@@ -24,6 +24,7 @@ let hovered = null;
 const selectedIds = new Set();                // pinned nodes (multi-select)
 const activeFilters = new Set();               // legend category filters
 let detailNode = null;                         // node shown in the detail panel
+const detailFilters = new Set();               // category filters scoped to detailNode
 let highlight = null;                         // Set of node ids to keep lit
 let connectors = new Set();                    // bridge nodes linking 2+ selected
 let intro = 0;                                // 0→1 entrance progress
@@ -290,8 +291,20 @@ function selectionHighlight() {
   return h;
 }
 
+// Neighbours of `n` grouped by legend category, used by the detail panel.
+function neighboursByCategory(n) {
+  const out = { source: [], document: [], author: [], scripture: [] };
+  for (const id of adj.get(n.id)) {
+    const m = nodeById.get(id);
+    out[nodeCategory(m)].push(m);
+  }
+  return out;
+}
+
 // Recompute what stays lit by combining the pin-selection, the legend filters,
-// and (when nothing else is active) a hover preview.
+// detail-panel category filters, and (when nothing else is active) a hover
+// preview. The detail filters narrow the detail node's neighbourhood to just
+// the chosen categories — they replace the size-1 selection's full halo.
 function computeHighlight() {
   const sel = selectionHighlight();   // also populates `connectors`
   let filt = null;
@@ -299,8 +312,25 @@ function computeHighlight() {
     filt = new Set();
     for (const n of nodes) if (matchesFilter(n)) filt.add(n.id);
   }
-  if (sel && filt) highlight = new Set([...sel, ...filt]);
-  else if (sel) highlight = sel;
+  let detailH = null;
+  if (detailNode && detailFilters.size) {
+    detailH = new Set([detailNode.id]);
+    for (const id of adj.get(detailNode.id)) {
+      if (detailFilters.has(nodeCategory(nodeById.get(id)))) detailH.add(id);
+    }
+  }
+  // detailH narrows: if it's active and the selection is just the detail node,
+  // prefer the narrower set over the full neighbourhood.
+  let base = sel;
+  if (detailH && sel && selectedIds.size === 1 && selectedIds.has(detailNode.id)) {
+    base = detailH;
+  } else if (detailH && sel) {
+    base = new Set([...sel, ...detailH]);
+  } else if (detailH) {
+    base = detailH;
+  }
+  if (base && filt) highlight = new Set([...base, ...filt]);
+  else if (base) highlight = base;
   else if (filt) highlight = filt;
   else highlight = hovered ? new Set([hovered.id, ...adj.get(hovered.id)]) : null;
 }
@@ -356,7 +386,14 @@ function bindEvents() {
 
   // closing the detail panel hides it but keeps the pinned selection
   document.getElementById("detail-close").addEventListener("click", () => {
-    detailNode = null; showDetail(null);
+    detailNode = null; detailFilters.clear();
+    showDetail(null); computeHighlight(); dirty = true;
+  });
+
+  // connection rows act as per-node category filters
+  document.getElementById("detail-connections").addEventListener("click", (e) => {
+    const btn = e.target.closest(".detail__conn");
+    if (btn) toggleDetailFilter(btn.dataset.cat);
   });
 
   // selection bar: remove one chip, or clear all
@@ -370,6 +407,7 @@ function bindEvents() {
     if (e.key !== "Escape") return;
     if (document.activeElement === document.getElementById("search-input")) return;
     clearFilters();
+    detailFilters.clear();
     clearSelection();   // also recomputes highlight & redraws
   });
 }
@@ -379,6 +417,7 @@ function bindEvents() {
 // reflects the most recently clicked node, without disturbing the pinned set.
 function toggleSelect(n) {
   if (!n) { clearSelection(); return; }
+  const prevDetail = detailNode;
   if (selectedIds.has(n.id)) {
     selectedIds.delete(n.id);
     detailNode = selectedIds.size ? nodeById.get([...selectedIds].at(-1)) : null;
@@ -386,11 +425,13 @@ function toggleSelect(n) {
     selectedIds.add(n.id);
     detailNode = n;
   }
+  if (detailNode !== prevDetail) detailFilters.clear();
   afterSelectionChange();
 }
 
 function pin(n) {                 // add (if absent) and inspect — used by search
   if (!n) return;
+  if (detailNode !== n) detailFilters.clear();
   selectedIds.add(n.id);
   detailNode = n;
   afterSelectionChange();
@@ -399,6 +440,7 @@ function pin(n) {                 // add (if absent) and inspect — used by sea
 function clearSelection() {
   selectedIds.clear();
   detailNode = null;
+  detailFilters.clear();
   afterSelectionChange();
 }
 
@@ -415,45 +457,82 @@ function showDetail(n) {
   if (!n) { panel.hidden = true; return; }
 
   document.getElementById("detail-kind").textContent =
-    n.is_source ? "The reigning encyclical" :
+    n.is_source ? "Encyclical" :
     n.type === "document" ? (n.doc_type || "Magisterial work") :
     KIND_LABEL[n.type] || n.type;
   document.getElementById("detail-title").textContent = n.label || n.id;
 
+  // Intrinsic facts (date, author, testament) — distinct from connection rows.
   const meta = document.getElementById("detail-meta");
   meta.innerHTML = "";
-  // Incoming citations: documents are cited via "cites"; scripture via
-  // "cites_scripture". Edge weight is the citing-side multiplicity (e.g. one
-  // encyclical referring to a passage in three different footnotes → weight 3),
-  // so the source count and total can differ.
-  const incomingType = n.type === "scripture" ? "cites_scripture" : "cites";
-  const incoming = edges.filter((e) => e.target === n.id && e.type === incomingType);
-  const citedBy = incoming.length;
-  const citedTimes = incoming.reduce((s, e) => s + (e.weight || 1), 0);
-  const cites = edges.filter((e) => e.source === n.id && e.type === "cites").length;
-  const unit = n.type === "scripture" ? "encyclical" : "work";
-  const rows = [];
-  if (n.type === "document" && n.author) rows.push(["Author", n.author]);
-  if (n.type === "document" && n.date) rows.push(["Promulgated", n.date]);
-  if (n.type === "scripture") rows.push(["Testament", n.testament === "OT" ? "Old Testament" : "New Testament"]);
-  if (n.type === "author") rows.push(["Works in view", String(adj.get(n.id).size)]);
-  if (citedBy) rows.push(["Cited by",
-    citedTimes === citedBy
-      ? `${citedBy} ${unit}${citedBy > 1 ? "s" : ""}`
-      : `${citedBy} ${unit}${citedBy > 1 ? "s" : ""} (${citedTimes} citations)`]);
-  if (cites) rows.push(["References", `${cites} work${cites > 1 ? "s" : ""}`]);
-  if (n.type === "document" && !n.in_corpus && !citedBy) rows.push(["Status", "Referenced"]);
-  for (const [k, v] of rows) {
+  const facts = [];
+  if (n.type === "document" && n.author) facts.push(["Author", n.author]);
+  if (n.type === "document" && n.date) facts.push(["Promulgated", n.date]);
+  if (n.type === "scripture") facts.push(["Testament", n.testament === "OT" ? "Old Testament" : "New Testament"]);
+  for (const [k, v] of facts) {
     const div = document.createElement("div");
-    div.innerHTML = `<dt>${k}</dt><dd>${v}</dd>`;
+    div.innerHTML = `<dt>${k}</dt><dd>${escapeHtml(v)}</dd>`;
     meta.appendChild(div);
   }
+
+  // Connection rows — neighbours grouped by category, each row selectable.
+  // For documents we split incoming (Cited by) from outgoing-document neighbours
+  // (References); authors/scripture neighbours are the same in both directions.
+  const conns = document.getElementById("detail-connections");
+  conns.innerHTML = "";
+  const byCat = neighboursByCategory(n);
+  // "Cited by" only makes sense as encyclical sources (the corpus' source docs)
+  // pointing at this node. For a source encyclical we skip it (it isn't cited
+  // by anything in the current single-generation corpus).
+  const items = [];
+  if (!n.is_source && byCat.source.length) {
+    items.push({ key: "source", label: "Cited by", unit: "encyclical",
+                 count: byCat.source.length, cat: "source" });
+  }
+  if (byCat.document.length) {
+    items.push({ key: "document", label: "References", unit: "work",
+                 count: byCat.document.length, cat: "document" });
+  }
+  if (byCat.author.length) {
+    items.push({ key: "author", label: "Authors & councils", unit: "person",
+                 count: byCat.author.length, cat: "author" });
+  }
+  if (byCat.scripture.length) {
+    items.push({ key: "scripture", label: "Scripture", unit: "passage",
+                 count: byCat.scripture.length, cat: "scripture" });
+  }
+  for (const it of items) {
+    const pressed = detailFilters.has(it.cat);
+    const plural = it.count === 1 ? it.unit : it.unit + "s";
+    const btn = document.createElement("button");
+    btn.className = "detail__conn";
+    btn.dataset.cat = it.cat;
+    btn.setAttribute("aria-pressed", String(pressed));
+    btn.title = `Highlight the ${it.count} ${plural} connected to this node`;
+    btn.innerHTML =
+      `<span class="swatch swatch--${it.cat}"></span>` +
+      `<span class="detail__conn-label">${it.label}</span>` +
+      `<span class="detail__conn-count">${it.count.toLocaleString()} ${plural}</span>`;
+    conns.appendChild(btn);
+  }
+  conns.hidden = items.length === 0;
 
   const link = document.getElementById("detail-link");
   if (n.url) { link.href = n.url; link.hidden = false; }
   else link.hidden = true;
 
   panel.hidden = false;
+}
+
+// Toggle a category in the detail-scoped filter set.
+function toggleDetailFilter(cat) {
+  if (detailFilters.has(cat)) detailFilters.delete(cat);
+  else detailFilters.add(cat);
+  for (const btn of document.querySelectorAll("#detail-connections .detail__conn")) {
+    btn.setAttribute("aria-pressed", String(detailFilters.has(btn.dataset.cat)));
+  }
+  computeHighlight();
+  dirty = true;
 }
 
 // ---- selection bar (chips + connection summary) --------------------------

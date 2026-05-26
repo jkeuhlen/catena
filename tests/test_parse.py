@@ -244,8 +244,76 @@ def test_curated_work_canonicalization():
     g = graph.build_graph([doc])
     summa = [n for n in g["nodes"] if n["id"] == "doc:work:summa-theologiae"]
     assert len(summa) == 1 and summa[0]["type"] == "document"
+    # works.py declares the Summa's doc_type — and the canonicalizer always
+    # writes it, so a stale "Encyclical" carried over from a neighbouring
+    # footnote (the original bug) can never reach the node.
+    assert summa[0]["doc_type"] == "Scholastic treatise"
     author_labels = {n["label"] for n in g["nodes"] if n["type"] == "author"}
     assert author_labels == {"Francis", "Saint Thomas Aquinas"}
+
+
+def test_relative_link_and_title_modifier():
+    # Regression for *Caritas in Veritate* fn 19, which produced the bogus
+    # author "Benedict XVI, Christmas": the footnote uses a *relative* href, so
+    # the link wasn't being recognised, and the parser fell into the link-less
+    # branch where "Address" (inside the title "Christmas Address…") was the
+    # first type keyword — author got sliced as "Benedict XVI, Christmas ".
+    # Two fixes: (1) accept relative Vatican-shaped hrefs as document links,
+    # (2) drop title-modifier text after the author's trailing comma.
+    html = """
+    <html><head><title>X (29 June 2009)</title>
+      <link rel="canonical" href="http://www.vatican.va/content/benedict-xvi/en/encyclicals/documents/x.html"/>
+    </head><body>
+      <p class="MsoFootnoteText"><a name="_edn19" href="#_ednref19">[19]</a>
+        Cf. Benedict XVI,
+        <i><a href="/content/benedict-xvi/en/speeches/2005/december/documents/hf_ben_xvi_spe_20051222_roman-curia.html">Christmas Address to the Roman Curia</a></i>,
+        22 December 2005.</p>
+    </body></html>
+    """
+    doc = parse.parse_document(html, "https://www.vatican.va/content/benedict-xvi/en/encyclicals/documents/x.html")
+    assert len(doc.citations) == 1
+    c = doc.citations[0]
+    assert c.author == "Benedict XVI"
+    assert c.title == "Christmas Address to the Roman Curia"
+    assert c.doc_type == "Address"
+    # relative href resolved to absolute against the source URL
+    assert c.url.startswith("https://www.vatican.va/")
+    assert c.url.endswith("hf_ben_xvi_spe_20051222_roman-curia.html")
+
+
+def test_title_modifier_defence_for_linkless_notes():
+    # Even with no link, "Pius XII, Christmas Message, AAS …" must not absorb
+    # "Christmas" into the author. This pins the link-less defence in depth.
+    html = """
+    <html><head><title>X (1 January 2020)</title>
+      <link rel="canonical" href="http://www.vatican.va/content/francesco/en/encyclicals/documents/x.html"/>
+    </head><body>
+      <p class="MsoFootnoteText"><a name="_ftn1" href="#_ftnref1">[1]</a>
+        Pius XII, <i>Christmas Message</i>, 1942.</p>
+    </body></html>
+    """
+    doc = parse.parse_document(html, "https://www.vatican.va/content/francesco/en/encyclicals/documents/x.html")
+    assert len(doc.citations) == 1
+    c = doc.citations[0]
+    assert c.author == "Pius XII"
+    assert c.title == "Christmas Message"
+    assert c.doc_type == "Message"
+
+
+def test_curated_doc_type_overrides_stale_carryover():
+    # Regression: a footnote citing the Summa once inherited doc_type="Encyclical"
+    # via an ibid./apparatus chain from a neighbouring encyclical citation. The
+    # canonicalizer used to leave that stale type intact; it must now overwrite
+    # with the curated table's truth.
+    stale = parse.Citation(
+        footnote=1, author="Saint Thomas Aquinas", author_key="thomas aquinas",
+        title="Summa Theologiae", doc_type="Encyclical",  # the buggy carryover
+        url=None, target_key="doc:bogus",
+    )
+    fixed = parse._canonicalize(stale)
+    assert fixed.title == "Summa Theologiae"
+    assert fixed.doc_type == "Scholastic treatise"
+    assert fixed.target_key == "doc:work:summa-theologiae"
 
 
 def test_apparatus_does_not_leak_into_authors():

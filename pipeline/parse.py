@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field, replace
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -143,6 +144,16 @@ def _author_type(prefix: str) -> tuple[str | None, str | None, str | None]:
     canonical_type, type_idx = normalize.detect_type(prefix)
     if type_idx > 0:
         author_raw = prefix[:type_idx]
+        # "AUTHOR, [modifier] TYPE …": a title modifier like "Christmas" in
+        # "Benedict XVI, Christmas Address…" sits between the author's trailing
+        # comma and the type keyword. Without this cut it gets glued to the
+        # author (the *Caritas in Veritate* regression). Real personal/body
+        # names never have trailing non-whitespace text after a comma in this
+        # slot — the convention is "AUTHOR, …" with the title on the right.
+        if "," in author_raw:
+            head, _, tail = author_raw.rpartition(",")
+            if tail.strip():
+                author_raw = head
     elif type_idx == 0:
         author_raw = ""            # starts with the type → no leading author
     else:
@@ -213,7 +224,8 @@ def _prefix_before_first_doclink(p: Tag) -> str | None:
     return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
-def _parse_note(number: int, p: Tag, prev: Citation | None) -> tuple[list[Citation], Citation | None]:
+def _parse_note(number: int, p: Tag, prev: Citation | None,
+                source_url: str = "") -> tuple[list[Citation], Citation | None]:
     """Parse one note (foot- or endnote) given its number and the previous primary
     citation for ibid. resolution.
 
@@ -258,7 +270,11 @@ def _parse_note(number: int, p: Tag, prev: Citation | None) -> tuple[list[Citati
     citations: list[Citation] = []
     if links:
         for url, link_text in links:
-            doc_key = normalize.doc_key_from_url(url)
+            # Relative Vatican hrefs ("/content/.../documents/...html") are real
+                # document links — resolve them against the source page so the
+                # citation carries an absolute URL the site can link out to.
+            absolute = urljoin(source_url, url) if source_url else url
+            doc_key = normalize.doc_key_from_url(absolute)
             title = link_text.strip()
             if not title or _IBID.search(title):
                 title = (prev.title if prev else None) or normalize.title_from_slug(doc_key)
@@ -267,7 +283,7 @@ def _parse_note(number: int, p: Tag, prev: Citation | None) -> tuple[list[Citati
                     footnote=number,
                     target_key=doc_key,
                     title=title,
-                    url=url.replace("http://", "https://"),
+                    url=absolute.replace("http://", "https://"),
                     author=author,
                     author_key=author_key,
                     # infer a type from the title when the prefix gave none
@@ -319,7 +335,11 @@ def _canonicalize(c: Citation) -> Citation:
 
     Fixes authorship (e.g. attributes every form of the *Summa* to Aquinas) and,
     for works without an online edition, unifies the node key so the variants
-    collapse to one node.
+    collapse to one node. Also overwrites ``doc_type``: a citing footnote may
+    leave a stale type on the citation (most often inherited via ibid./idem from
+    a neighbouring "Encyclical Letter…" citation), and the curated table is the
+    ground truth for what a famous work actually is — letting that stale type
+    ride was how the Summa once ended up labelled "Encyclical".
     """
     work = works.lookup(c.title)
     if work is None:
@@ -330,6 +350,7 @@ def _canonicalize(c: Citation) -> Citation:
         author=work.author,
         author_key=key,
         title=work.title,
+        doc_type=work.doc_type,
         target_key=work.key if c.url is None else c.target_key,
     )
 
@@ -512,7 +533,7 @@ def parse_document(html: str, source_url: str) -> ParsedDocument:
     citations: list[Citation] = []
     prev: Citation | None = None
     for number, block in notes:
-        cites, prev = _parse_note(number, block, prev)
+        cites, prev = _parse_note(number, block, prev, source_url=source_url)
         citations.extend(cites)
     # map famous works onto their curated canonical identity (author + key)
     citations = [_canonicalize(c) for c in citations]

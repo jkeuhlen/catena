@@ -10,7 +10,7 @@
 
   /* manuscript pigments */
   --gold:       #d8b65f;   /* leaf / illumination       */
-  --gold-bright:#f1d486;   /* the reigning encyclical    */
+  --gold-bright:#f1d486;   /* source encyclicals         */
   --ochre:      #b98f3e;   /* cited works                */
   --oxblood:    #c05a44;   /* authors, councils          */
   --lapis:      #5a82c4;   /* scripture                  */
@@ -360,6 +360,32 @@ body.reading { overflow: auto; }
 }
 .detail__link:hover { transform: translateY(-1px); box-shadow: 0 7px 20px rgba(216,182,95,0.4); }
 .detail__link[hidden] { display: none; }  /* class display would otherwise beat [hidden] */
+
+/* Connection rows — selectable category breakdown, mirrors the legend. */
+.detail__connections {
+  margin: 1rem 0 0; padding-top: 0.85rem;
+  border-top: 1px solid var(--rule);
+  display: flex; flex-direction: column; gap: 0.1rem;
+}
+.detail__connections[hidden] { display: none; }
+.detail__conn {
+  display: flex; align-items: center; gap: 0.6rem; width: 100%;
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  padding: 0.32rem 0.45rem;
+  font-family: var(--serif-body); font-size: 0.98rem; color: var(--parchment);
+  text-align: left; cursor: pointer; transition: background 0.2s, border-color 0.2s;
+}
+.detail__conn:hover { background: rgba(216, 182, 95, 0.08); }
+.detail__conn[aria-pressed="true"] {
+  background: rgba(216, 182, 95, 0.14); border-color: var(--rule);
+}
+.detail__conn-label { flex: 1; }
+.detail__conn-count {
+  font-size: 0.78rem; color: var(--parchment-dim); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.detail__conn:hover .detail__conn-count,
+.detail__conn[aria-pressed="true"] .detail__conn-count { color: var(--gold); }
 
 /* ---- loading ----------------------------------------------------- */
 .loading {
