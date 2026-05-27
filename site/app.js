@@ -38,6 +38,24 @@ let dirty = true;
 let tween = null;                             // active camera fly-to, or null
 let pulse = null;                             // {node, t0} expanding ring on focus
 
+// ---- views ----------------------------------------------------------------
+// Two views share one corpus and one renderer; only the layout, the camera,
+// and the visibility rules change. Each node carries its precomputed Explore
+// coordinates in (n.x, n.y) — immutable. Per-view targets live in `targets`
+// keyed by view, and the renderer reads from (n._x, n._y, n._op) which we
+// lerp toward the active view's target each frame on view-switch.
+const VIEWS = ["explore", "timeline"];
+const state = { view: "explore" };
+const targets = { explore: new Map(), timeline: new Map() };
+let viewTween = null;        // {from:Map, t0, dur} during a view transition
+const VIEW_TWEEN_MS = 600;
+// Year window used for the Timeline vertical axis.
+let YEAR_MIN = 1500, YEAR_MAX = 2030;
+// World height of the chronological layout — chosen so the existing camera
+// scale ≈ 1 frames a comfortable couple of centuries on screen.
+const TIMELINE_H = 4200;
+const TIMELINE_W = 2400;     // horizontal spread within the widest year
+
 // ---- node visual scale ----------------------------------------------------
 const radius = (n) => {
   if (n.type === "scripture") return 3 + Math.sqrt(n.degree) * 1.1;
@@ -65,12 +83,32 @@ async function init() {
     inBy.get(e.target)?.[e.type]?.add(e.source);
   });
 
+  // initialise per-node draw state from the precomputed Explore layout
+  for (const n of nodes) {
+    n._x = n.x; n._y = n.y; n._op = 1;
+    targets.explore.set(n.id, { x: n.x, y: n.y, op: 1 });
+  }
+  // Year window for the timeline axis. Anchored to the earliest *seed* — the
+  // citation corpus reaches back to the 1500s, but the seeds (the works the
+  // visualisation is actually about) all live 1891→now, so this is where the
+  // axis density should pay off. Older citations clamp to the top of the axis;
+  // a small "before 1880" marker would be a nice follow-up.
+  const seedYears = nodes.filter((n) => n.is_source && n.year).map((n) => n.year);
+  const allYears = nodes.filter((n) => n.type === "document" && n.year).map((n) => n.year);
+  if (seedYears.length) {
+    YEAR_MIN = Math.floor(Math.min(...seedYears) / 10) * 10;
+    YEAR_MAX = Math.max(new Date().getFullYear(), Math.max(...allYears)) + 1;
+  }
+  buildTimelineTargets();
+
   buildStats(data.meta);
   buildSearch();
   buildLegend();
+  buildViewSwitcher();
   resize();
   fitToContent();
   bindEvents();
+  readHashView();   // restore #view=… on load
 
   // entrance
   const loading = document.getElementById("loading");
@@ -85,12 +123,15 @@ async function init() {
   })(t0);
 
   // keep drawing only when needed
-  (function loop(t) {
+  requestAnimationFrame(function loop(t) {
+    const camMoving = !!tween;
     if (tween) tween(t);
+    tickPositions(t);
     if (pulse && t - pulse.t0 < PULSE_MS) dirty = true;
     if (dirty) draw();
+    // the in-canvas time axis redraws each frame; no DOM ruler to update.
     requestAnimationFrame(loop);
-  })();
+  });
 }
 
 const PULSE_MS = 1100;
@@ -105,6 +146,7 @@ function flyTo(wx, wy, scale, dur = 680) {
     cam.x = from.x + (to.x - from.x) * e;
     cam.y = from.y + (to.y - from.y) * e;
     cam.scale = from.scale + (to.scale - from.scale) * e;
+    clampCamera();
     dirty = true;
     if (k >= 1) tween = null;
   };
@@ -148,6 +190,10 @@ function draw() {
   const W = canvas.clientWidth, H = canvas.clientHeight;
   ctx.clearRect(0, 0, W, H);
 
+  // Chronological views: paint the time axis BEFORE nodes so labels and
+  // gridlines sit behind the data, hugging the swarm column.
+  if (state.view !== "explore") drawTimeAxis(W, H);
+
   const lit = (id) => !highlight || highlight.has(id);
 
   // Edges, drawn in three z-tiers so the selection's threads paint on top of
@@ -168,7 +214,7 @@ function draw() {
   for (let t = 0; t < 3; t++) {
     for (const e of tiers[t]) {
       const a = nodeById.get(e.source), b = nodeById.get(e.target);
-      const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
+      const [ax, ay] = toScreen(a._x, a._y), [bx, by] = toScreen(b._x, b._y);
       const tgt = nodeById.get(e.target);
       const col = colorOf(tgt.is_source ? a : tgt);
       const baseAlpha = e.type === "cites" ? 0.22 : 0.13;
@@ -176,7 +222,10 @@ function draw() {
       if (t === 0)      { alpha = highlight ? 0.012 : baseAlpha; width = 0.7; }
       else if (t === 1) { alpha = baseAlpha * 0.9;               width = 1.1; }
       else              { alpha = Math.min(0.95, baseAlpha * 2.6); width = 1.7; }
-      ctx.strokeStyle = hexA(t === 2 ? "#f4e4bd" : col, alpha * intro);
+      // edges fade with whichever endpoint is more hidden — keeps the threads
+      // from being visible while their nodes are gone in Timeline.
+      const endpointOp = Math.min(a._op ?? 1, b._op ?? 1);
+      ctx.strokeStyle = hexA(t === 2 ? "#f4e4bd" : col, alpha * intro * endpointOp);
       ctx.lineWidth = width;
       // gentle arc for an organic, manuscript feel
       const mx = (ax + bx) / 2, my = (ay + by) / 2;
@@ -192,16 +241,18 @@ function draw() {
   // nodes
   const smallNeighbourhood = highlight && highlight.size <= 30;
   for (const n of nodes) {
-    const [x, y] = toScreen(n.x, n.y);
+    if ((n._op ?? 1) <= 0.01) continue;
+    const [x, y] = toScreen(n._x, n._y);
     const r = radius(n) * (0.4 + 0.6 * ease(intro));
     const on = lit(n.id);
     const col = colorOf(n);
     const isSel = selectedIds.has(n.id);
     const isBridge = connectors.has(n.id);
+    const op = n._op ?? 1;
 
     if (n.is_source || isSel || (on && n === hovered)) {
       const glow = ctx.createRadialGradient(x, y, 0, x, y, r * 4.5);
-      glow.addColorStop(0, hexA(col, 0.5 * intro));
+      glow.addColorStop(0, hexA(col, 0.5 * intro * op));
       glow.addColorStop(1, hexA(col, 0));
       ctx.fillStyle = glow;
       ctx.beginPath(); ctx.arc(x, y, r * 4.5, 0, Math.PI * 2); ctx.fill();
@@ -209,20 +260,20 @@ function draw() {
 
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = hexA(col, (on ? 1 : 0.16) * intro);
+    ctx.fillStyle = hexA(col, (on ? 1 : 0.16) * intro * op);
     ctx.fill();
     if (on) {
       ctx.lineWidth = 1;
-      ctx.strokeStyle = hexA("#0c0a07", 0.6 * intro);
+      ctx.strokeStyle = hexA("#0c0a07", 0.6 * intro * op);
       ctx.stroke();
     }
     // pinned nodes get a bright ring; bridge nodes a subtler gold ring
     if (isSel) {
       ctx.beginPath(); ctx.arc(x, y, r + 3.5, 0, Math.PI * 2);
-      ctx.strokeStyle = hexA("#f4e4bd", 0.95 * intro); ctx.lineWidth = 2; ctx.stroke();
+      ctx.strokeStyle = hexA("#f4e4bd", 0.95 * intro * op); ctx.lineWidth = 2; ctx.stroke();
     } else if (isBridge) {
       ctx.beginPath(); ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
-      ctx.strokeStyle = hexA("#d8b65f", 0.7 * intro); ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.strokeStyle = hexA("#d8b65f", 0.7 * intro * op); ctx.lineWidth = 1.2; ctx.stroke();
     }
   }
 
@@ -230,6 +281,11 @@ function draw() {
   // node, and (for a single small neighbourhood) its members.
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
+  // In the chronological views the per-year swarm gets crowded fast, so we
+  // suppress the "always-label big works" rule and let users surface labels
+  // by zooming, hovering, or selecting. Sources stay labelled — they're the
+  // narrative spine of the view.
+  const inChrono = state.view !== "explore";
   for (const n of nodes) {
     const big = n.type === "document" && n.degree >= 16;
     const isSel = selectedIds.has(n.id);
@@ -237,16 +293,20 @@ function draw() {
     const member = highlight && highlight.has(n.id);
     const neighbourLabel = smallNeighbourhood && member && selectedIds.size <= 1;
     const filterLabel = activeFilters.size && member && n.degree >= 12;
+    const ambientLabel = inChrono
+      ? (n.is_source && cam.scale > 0.45)        // sources only, and only once zoomed in a bit
+      : (big && (!highlight || member));
     const show = isSel || isBridge || n === hovered || n === detailNode ||
-                 neighbourLabel || filterLabel || (big && (!highlight || member));
+                 neighbourLabel || filterLabel || ambientLabel;
     if (!show) continue;
-    const [x, y] = toScreen(n.x, n.y);
+    if ((n._op ?? 1) <= 0.01) continue;
+    const [x, y] = toScreen(n._x, n._y);
     const r = radius(n);
     const label = n.label || n.id;
     const emphatic = isSel || isBridge || n === hovered || n === detailNode;
     const size = n.is_source ? 19 : (big || emphatic) ? 14.5 : 13;
     ctx.font = `${n.is_source || isSel ? 600 : 500} ${size}px "Cormorant Garamond", serif`;
-    const alpha = (emphatic ? 1 : 0.75) * intro;
+    const alpha = (emphatic ? 1 : 0.75) * intro * (n._op ?? 1);
     ctx.fillStyle = hexA("#0c0a07", 0.85 * alpha);
     ctx.fillText(label, x + r + 6 + 0.6, y + 0.6);  // shadow
     ctx.fillStyle = hexA(isSel ? "#f7ead0" : n.is_source ? "#f4e4bd" : "#ece2cd", alpha);
@@ -258,7 +318,7 @@ function draw() {
     const k = (performance.now() - pulse.t0) / PULSE_MS;
     if (k >= 1) { pulse = null; }
     else {
-      const [px, py] = toScreen(pulse.node.x, pulse.node.y);
+      const [px, py] = toScreen(pulse.node._x, pulse.node._y);
       const r0 = radius(pulse.node);
       for (const lag of [0, 0.33]) {
         const kk = k - lag;
@@ -273,6 +333,45 @@ function draw() {
   }
 }
 
+// In-canvas time axis: horizontal decade lines across the viewport plus a
+// labeled stack of year ticks on the left edge of the screen (pinned in
+// screen-space, drifting only in y). Years are picked so roughly 8-14 ticks
+// are visible at the current zoom.
+function drawTimeAxis(W, H) {
+  const years = Math.max(1, (H / cam.scale) * (YEAR_MAX - YEAR_MIN) / TIMELINE_H);
+  let step = 10;
+  if (years > 350) step = 100;
+  else if (years > 140) step = 50;
+  else if (years > 60) step = 20;
+  else if (years > 30) step = 10;
+  else step = 5;
+  const yStart = Math.ceil(YEAR_MIN / step) * step;
+  // gridlines first (very faint)
+  ctx.lineWidth = 1;
+  for (let y = yStart; y <= YEAR_MAX; y += step) {
+    const [, sy] = toScreen(0, yearToY(y));
+    if (sy < -1 || sy > H + 1) continue;
+    const major = (y % 100 === 0);
+    ctx.strokeStyle = `rgba(216,182,95,${major ? 0.16 : 0.08})`;
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.lineTo(W, sy);
+    ctx.stroke();
+  }
+  // labels — left-edge column, padded clear of the masthead and the legend
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  for (let y = yStart; y <= YEAR_MAX; y += step) {
+    const [, sy] = toScreen(0, yearToY(y));
+    if (sy < 80 || sy > H - 80) continue;
+    const major = (y % 100 === 0);
+    const px = 22;
+    ctx.font = `${major ? 600 : 500} ${major ? 13 : 11}px "Cormorant Garamond", serif`;
+    ctx.fillStyle = `rgba(${major ? "244,228,189" : "182,169,136"},${major ? 0.85 : 0.55})`;
+    ctx.fillText(`${y}`, px, sy);
+  }
+}
+
 const ease = (t) => 1 - Math.pow(1 - t, 3);
 function hexA(hex, a) {
   const v = parseInt(hex.slice(1), 16);
@@ -283,7 +382,8 @@ function hexA(hex, a) {
 function nodeAt(sx, sy) {
   let best = null, bestD = Infinity;
   for (const n of nodes) {
-    const [x, y] = toScreen(n.x, n.y);
+    if ((n._op ?? 1) <= 0.05) continue;
+    const [x, y] = toScreen(n._x, n._y);
     const r = radius(n) + 4;
     const d = (x - sx) ** 2 + (y - sy) ** 2;
     if (d <= r * r && d < bestD) { best = n; bestD = d; }
@@ -399,6 +499,194 @@ function computeHighlight() {
   else highlight = hovered ? new Set([hovered.id, ...adj.get(hovered.id)]) : null;
 }
 
+// ---- view targets / layout solvers ---------------------------------------
+// Map each node to its (x, y, opacity) for the given view. Authors/scripture
+// don't sit on the chronological axis — they fade out in Timeline
+// but their last position is preserved so they animate gently to the wings.
+const yearToY = (year) =>
+  (TIMELINE_H * (year - YEAR_MIN)) / (YEAR_MAX - YEAR_MIN) - TIMELINE_H / 2;
+
+// Beeswarm packing: place each year-bucket as a horizontal swarm centered on
+// the year's y-coordinate, stacking into a small number of lanes when one
+// row would overflow `maxWidth`. Bigger-degree (more cited) works sort first
+// so they end up nearest the axis center — the eye lands on what matters.
+function beeswarmLayout(buckets, target, { pitch, lanePitch, maxWidth, rootId = null }) {
+  const maxCols = Math.max(2, Math.floor(maxWidth / pitch));
+  for (const [year, row] of buckets) {
+    row.sort((a, b) => (b.degree || 0) - (a.degree || 0));
+    if (rootId) {                            // root claims the center slot
+      const i = row.findIndex((n) => n.id === rootId);
+      if (i > 0) row.unshift(row.splice(i, 1)[0]);
+    }
+    const baseY = yearToY(year);
+    const lanes = Math.max(1, Math.ceil(row.length / maxCols));
+    for (let i = 0; i < row.length; i++) {
+      // weave through lanes so each lane fills uniformly: lane 0 first, then 1, …
+      const lane = i % lanes;
+      const colIdx = Math.floor(i / lanes);
+      const colsInLane = Math.ceil((row.length - lane) / lanes);
+      const x = (colIdx - (colsInLane - 1) / 2) * pitch;
+      const y = baseY + (lane - (lanes - 1) / 2) * lanePitch;
+      target.set(row[i].id, { x, y, op: 1 });
+    }
+  }
+}
+
+function buildTimelineTargets() {
+  const buckets = new Map();
+  for (const n of nodes) {
+    if (n.type !== "document" || !n.year) continue;
+    // Clamp pre-seed-era citations to the top of the axis so they pile up
+    // without ranging off-screen.
+    const y = Math.max(YEAR_MIN, n.year);
+    if (!buckets.has(y)) buckets.set(y, []);
+    buckets.get(y).push(n);
+  }
+  const t = targets.timeline;
+  t.clear();
+  beeswarmLayout(buckets, t, { pitch: 28, lanePitch: 22, maxWidth: TIMELINE_W });
+  // Hide everything else; the explore-position fallback keeps the transition
+  // looking like a collapse into the timeline, not a teleport to (0, 0).
+  for (const n of nodes) {
+    if (!t.has(n.id)) t.set(n.id, { x: n.x, y: n.y, op: 0 });
+  }
+}
+
+function setView(next) {
+  if (!VIEWS.includes(next)) return;
+  // snapshot current positions as the animation source
+  const from = new Map();
+  for (const n of nodes) from.set(n.id, { x: n._x, y: n._y, op: n._op });
+  state.view = next;
+  viewTween = { from, t0: performance.now(), dur: VIEW_TWEEN_MS };
+  reflectViewChrome();
+  // Reset camera to a sensible frame for the new view.
+  const frame = frameForView(next);
+  flyTo(frame.x, frame.y, frame.scale, 700);
+  writeHashView();
+  dirty = true;
+}
+
+function reflectViewChrome() {
+  for (const btn of document.querySelectorAll(".viewswitch__btn")) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.view === state.view));
+  }
+}
+
+// Keep the camera anchored to content in the chronological views — nothing
+// off-axis is interesting to scroll to, and zooming all the way out makes the
+// nodes sub-pixel. Called from every code path that moves cam.x/y/scale.
+function clampCamera() {
+  if (state.view === "explore") return;
+  // Scale: a floor that keeps the smallest dot ≥ 1px on screen, a ceiling that
+  // prevents zooming so deep a single year row leaves the viewport.
+  const minScale = Math.max(0.25, canvas.clientHeight / (TIMELINE_H * 1.4));
+  cam.scale = Math.max(minScale, Math.min(6, cam.scale));
+  // Vertical: a small slack past the YEAR_MIN/MAX rows so the top/bottom
+  // labels don't sit flush against the edge.
+  const halfViewY = canvas.clientHeight / 2 / cam.scale;
+  const slack = 120;
+  cam.y = Math.max(-TIMELINE_H / 2 - slack + halfViewY * 0.0,
+                   Math.min(TIMELINE_H / 2 + slack - halfViewY * 0.0, cam.y));
+  // Horizontal: stay near the swarm column.
+  const halfViewX = canvas.clientWidth / 2 / cam.scale;
+  const xSlack = TIMELINE_W * 0.6;
+  cam.x = Math.max(-xSlack, Math.min(xSlack, cam.x));
+}
+
+function frameForView(view) {
+  if (view === "explore") {
+    return frameOfPoints(nodes.map((n) => ({ x: n.x, y: n.y })));
+  }
+  // Timeline: zooming out to fit 1880→2026 makes individual dots sub-pixel and
+  // hides the labels. Instead, frame ~50 years around an anchor — the pinned
+  // doc if you have one, else the most-recent encyclical (currently Magnifica
+  // Humanitas). Lets you read titles immediately and scroll outward for context.
+  const t = targets.timeline;
+  const pinned = [...selectedIds]
+    .map((id) => nodeById.get(id))
+    .find((n) => n && n.type === "document" && n.year);
+  const sources = nodes
+    .filter((n) => n.is_source && n.year)
+    .sort((a, b) => b.year - a.year);
+  const anchor = pinned || sources[0];
+  if (!anchor) return frameOfPoints([{ x: 0, y: 0 }]);
+  const pos = t.get(anchor.id) || { x: 0, y: yearToY(anchor.year) };
+  // ~50-year window vertically; horizontally centered on the anchor's column.
+  const winYears = 55;
+  const scale = canvas.clientHeight / ((winYears / (YEAR_MAX - YEAR_MIN)) * TIMELINE_H);
+  return { x: pos.x, y: pos.y, scale };
+}
+
+function frameOfPoints(pts, pad = 1.18) {
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const scale = Math.min(
+    canvas.clientWidth / Math.max(1, (maxX - minX) * pad),
+    canvas.clientHeight / Math.max(1, (maxY - minY) * pad)
+  );
+  return { x: cx, y: cy, scale };
+}
+
+function jumpToYear(year) {
+  const targetY = yearToY(year);
+  flyTo(cam.x, targetY, cam.scale, 600);
+}
+
+function buildViewSwitcher() {
+  for (const btn of document.querySelectorAll(".viewswitch__btn")) {
+    btn.addEventListener("click", () => setView(btn.dataset.view));
+  }
+  window.addEventListener("keydown", (e) => {
+    if (document.activeElement?.tagName === "INPUT") return;
+    if (e.key === "1") setView("explore");
+    else if (e.key === "2") setView("timeline");
+  });
+}
+
+function readHashView() {
+  const m = /^#view=(explore|timeline)\b/.exec(window.location.hash);
+  if (m) setView(m[1]);
+}
+
+function writeHashView() {
+  if (state.view === "explore") {
+    history.replaceState(null, "", window.location.pathname);
+  } else {
+    history.replaceState(null, "", `#view=${state.view}`);
+  }
+}
+
+// Per-frame node animation toward the active view's targets. Also handles the
+// view-tween (a one-time 600ms easing from the snapshot taken at switch).
+function tickPositions(t) {
+  const T = targets[state.view];
+  if (viewTween) {
+    const k = Math.min(1, (t - viewTween.t0) / viewTween.dur);
+    const e = ease(k);
+    for (const n of nodes) {
+      const from = viewTween.from.get(n.id);
+      const to = T.get(n.id) || from;
+      n._x = from.x + (to.x - from.x) * e;
+      n._y = from.y + (to.y - from.y) * e;
+      n._op = from.op + (to.op - from.op) * e;
+    }
+    dirty = true;
+    if (k >= 1) viewTween = null;
+  } else {
+    // No tween — make sure positions match the current target (idempotent).
+    for (const n of nodes) {
+      const to = T.get(n.id);
+      if (!to) continue;
+      if (n._x !== to.x || n._y !== to.y || n._op !== to.op) {
+        n._x = to.x; n._y = to.y; n._op = to.op; dirty = true;
+      }
+    }
+  }
+}
+
 // ---- interaction ----------------------------------------------------------
 function bindEvents() {
   window.addEventListener("resize", () => { resize(); });
@@ -413,7 +701,12 @@ function bindEvents() {
     if (dragging) {
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
-      cam.x -= dx / cam.scale; cam.y -= dy / cam.scale;
+      // In Timeline the y-axis is time — lock vertical pan to the wheel
+      // (and keep horizontal drag for browsing within a year).
+      const lockY = state.view !== "explore";
+      cam.x -= dx / cam.scale;
+      if (!lockY) cam.y -= dy / cam.scale;
+      clampCamera();
       lastX = e.clientX; lastY = e.clientY; dirty = true;
       return;
     }
@@ -438,6 +731,16 @@ function bindEvents() {
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
+    // Chronological views: wheel = scroll through time. Pinch / ctrl-wheel still
+    // zooms (mac trackpads dispatch pinch as `ctrlKey + wheel`). Shift inverts
+    // axis for trackpads that send horizontal deltas.
+    if (state.view !== "explore" && !e.ctrlKey && !e.metaKey) {
+      const dy = (e.shiftKey && e.deltaX) ? e.deltaX : e.deltaY;
+      cam.y += dy / cam.scale;
+      clampCamera();
+      dirty = true;
+      return;
+    }
     const [wx, wy] = toWorld(e.clientX - rect.left, e.clientY - rect.top);
     const factor = Math.exp(-e.deltaY * 0.0012);
     cam.scale = Math.max(0.05, Math.min(8, cam.scale * factor));
@@ -445,6 +748,7 @@ function bindEvents() {
     const [sx, sy] = toScreen(wx, wy);
     cam.x += (e.clientX - rect.left - sx) / -cam.scale;
     cam.y += (e.clientY - rect.top - sy) / -cam.scale;
+    clampCamera();
     dirty = true;
   }, { passive: false });
 
@@ -572,10 +876,11 @@ function showDetail(n) {
   }
   conns.hidden = items.length === 0;
 
+  const links = document.getElementById("detail-links");
+
   // Outbound buttons. Encyclicals get the existing "Read at the Vatican" pill;
   // pontiffs get profile + Wikipedia buttons instead. The container clears any
   // pontiff buttons from a previous render so they don't bleed across nodes.
-  const links = document.getElementById("detail-links");
   for (const el of links.querySelectorAll(".detail__link--pontiff")) el.remove();
   const link = document.getElementById("detail-link");
   if (n.pontiff) {
@@ -650,7 +955,10 @@ function renderSelectionBar() {
 function focusNode(n) {
   if (!n) return;
   const ids = new Set([n.id, ...adj.get(n.id)]);
-  const pts = nodes.filter((m) => ids.has(m.id));
+  const T = targets[state.view];
+  const pts = nodes
+    .filter((m) => ids.has(m.id))
+    .map((m) => { const v = T.get(m.id); return v && v.op > 0.2 ? v : { x: m._x, y: m._y }; });
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);

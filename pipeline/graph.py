@@ -28,6 +28,35 @@ def _norm_title(title: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 
+_YEAR_RE = re.compile(r"\b(1[5-9]\d{2}|20\d{2}|21\d{2})\b")
+_EIGHT_DIGITS = re.compile(r"(?<!\d)(\d{8})(?!\d)")
+_FOUR_DIGITS_BOUND = re.compile(r"(?<!\d)(1[5-9]\d{2}|20\d{2}|21\d{2})(?!\d)")
+
+
+def _year_of(date: str | None, url: str | None) -> int | None:
+    """Promulgation year for the chronological views.
+
+    Tries the parsed ``date`` first (any era's title parenthetical). Falls back
+    to the Vatican URL slug — modern paths embed YYYYMMDD, but Leo XIII / Pius
+    XI pages use DDMMYYYY, so we try both ends of any 8-digit block.
+    """
+    if date:
+        m = _YEAR_RE.search(date)
+        if m:
+            return int(m.group(1))
+    if url:
+        for m in _EIGHT_DIGITS.finditer(url):
+            s = m.group(1)
+            for cand in (s[:4], s[-4:]):
+                y = int(cand)
+                if 1500 < y < 2200:
+                    return y
+        m = _FOUR_DIGITS_BOUND.search(url)
+        if m:
+            return int(m.group(1))
+    return None
+
+
 class GraphBuilder:
     def __init__(self) -> None:
         self.nodes: dict[str, dict] = {}
@@ -133,6 +162,11 @@ class GraphBuilder:
             if n["type"] == "document":
                 n.setdefault("in_corpus", False)
                 n.setdefault("is_source", False)
+        # promulgation year on every document node (used by the Timeline /
+        # Lineage views; ``None`` for works without a parseable date or URL).
+        for n in self.nodes.values():
+            if n["type"] == "document":
+                n["year"] = _year_of(n.get("date"), n.get("url"))
         # tag author nodes that name a pope with their pontiff record so the
         # site can render the specialised card. The legend category stays
         # ``author`` — filters and counts are unaffected.
