@@ -43,10 +43,12 @@ pipeline/
   parse.py      Vatican HTML → ParsedDocument (metadata + Citations + scripture)
   normalize.py  author / type / document-identity / name-casing normalization
   works.py      curated canonicalization of famous classical/patristic works
+  bodies.py     curated curia / council / dicastery URL-slug → author name
+  pontiffs.py   curated pope records (slug, ordinal, reign, profile URLs)
   scripture.py  biblical citation parsing (Catholic 73-book canon)
   graph.py      ParsedDocuments → deduplicated {nodes, edges, meta}
   layout.py     force-directed layout precompute (networkx spring_layout)
-  cli.py        fetch / parse / build commands; SEEDS list
+  cli.py        fetch / parse / build commands; SEEDS list; depth-1 crawl
 site/
   index.html, styles.css, app.js   static canvas renderer (no graph library)
   about.html                       project + "how to read it" page
@@ -145,10 +147,74 @@ attribute's `display:none`. Any element toggled via `el.hidden = true` that also
 has a `.class { display: … }` needs an explicit `.class[hidden] { display: none }`
 (see `.detail__link`, `.selection`).
 
+## Layer-2 crawl (depth-1 recursion)
+
+`make build` parses the 16 seeds and then **recursively parses every cited
+document** that passes a kind filter — encyclicals, apostolic exhortations,
+apostolic letters, and everything under `/roman_curia/` and
+`/archive/hist_councils/` (`pipeline.cli._is_layer2_candidate`). Speeches /
+homilies / messages / audiences / angelus are deliberately excluded: they'd add
+leaf nodes without enriching edge structure. Layer-2 dedups by canonical
+`doc_key` (not URL) so the same work cited with many fragment anchors is
+fetched once. Pass `--no-recurse` to skip the crawl.
+
+Layer-2 docs get `in_corpus=True, is_source=False`; seeds get
+`in_corpus=True, is_source=True`. The legend filters on `is_source`.
+
+Four eras of footnote markup are now handled — see ``_collect_notes`` in
+``parse.py``. Strategies are tried in this order; the first non-empty result
+wins:
+
+1. **Modern anchors** (``_anchor_notes``): ``<a name="_ftnN"/_ednN"/>`` with a
+   back-link href ending or containing ``#_ftnrefN`` / ``#_ednrefN``. Covers
+   most pages from JP2 onwards, including absolute-href shapes (Evangelii
+   Gaudium, w2.vatican.va).
+2. **Vatican II / section-restarting** (``_section_notes``): a ``<p>NOTES</p>``
+   header followed by one ``<p>`` per note with the number leading the
+   paragraph; numbering resets at every chapter ("Preface 1, 2; Introduction
+   1, 2; Chapter I 1, … 16"). The discriminator that distinguishes this from
+   spurious matches inside a pre-2000 doc (which often also has a centered
+   ``<p>NOTES</p>``): **the first matched note must be number 1**. Pre-2000
+   notes are crammed into one ``<p>`` with ``(N)`` markers, so any
+   leading-digit ``<p>`` tags after their NOTES heading are stray body
+   locators ("14)", "23)") — never first-of-section.
+3. **Bracket-numbered, one-per-paragraph** (``_bracket_notes``): a long
+   contiguous run of ``<p>[N] …</p>`` tags with no anchors, no ``NOTES``
+   header, no ``<hr>`` boundary — just a tail-of-file note dump. The
+   Compendium of the Social Doctrine of the Church uses this shape for its
+   1232 notes. Discriminator: at least 20 such paragraphs in monotonically
+   non-decreasing order (stray inline ``[N]`` quotations or back-links in
+   body prose never accumulate to that depth).
+4. **Pre-2000 legacy split** (``_legacy_notes``): anchorless plain-text notes
+   in the post-``<hr>`` region with a marker zoo (``(N)``, ``N).``, ``N.``,
+   ``N .``), split on the monotonically ascending note numbers.
+
+Lumen Gentium and Apostolicam Actuositatem parse correctly but contribute 0
+work-citations because their footnotes are *almost entirely scripture*
+("1 Cf. Mk. 16:15; 2 Col. 1:15; …"); those refs land in the document-wide
+scripture sweep instead. All five Vatican II seeds and both pontifical-council
+documents (Compendium, Erga Migrantes) are now properly woven into the graph
+— none of the original "layer-2 sinks" remain.
+
+## Catechism handling
+
+The Catechism of the Catholic Church is served as five deep-linked HTML pages
+(`/archive/ENG0015/__P*.HTM`) — one per part, plus the index. All five collapse
+onto the single canonical key `doc:catechism-of-the-catholic-church` in
+`normalize.doc_key_from_url`, and `works.py` attaches the curated
+(`Catholic Church`, `Catechism`) author/type so the merged node never picks up
+a stale label from whichever citation registered it first.
+
 ## Testing & verification
 
 - `make check` before committing. Tests live in `tests/` and cover the pure
   parsing/graph/normalize logic with small inline HTML fixtures (no network).
+- **Regression net for the seed corpus**: `tests/regression/seed_snapshot.json`
+  pins every seed's parsed shape (all citation tuples, author histogram,
+  scripture histogram). The pytest in `tests/regression/test_seed_regression.py`
+  re-parses from `data/raw/` and diffs against the snapshot — any drift fails.
+  Regenerate intentionally with `uv run python -m tests.regression.snapshot`
+  and commit the diff alongside the code change.
 - **Visual verification** uses headless Chrome:
   `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless
   --screenshot=out.png --window-size=1500,950 --virtual-time-budget=3500 URL`.
@@ -159,8 +225,9 @@ has a `.class { display: … }` needs an explicit `.class[hidden] { display: non
 
 ## Known limitations / roadmap
 
-- **Single-generation graph**: only the seed encyclicals are parsed; the works
-  *they* cite aren't crawled recursively yet (the obvious next big feature).
+- **Two-generation graph**: seeds + one layer of cited documents are parsed
+  (see "Layer-2 crawl" above). Going to depth-2 would 10× the corpus and
+  needs a generation cap + bandwidth/storage plan before it's worth doing.
 - **Multi-citation footnotes**: a footnote citing several works attributes them
   all to the first author (real authorship is recovered when a work is parsed
   directly or via `works.py`). In the anchorless legacy notes this also leaves
@@ -171,9 +238,11 @@ has a `.class { display: … }` needs an explicit `.class[hidden] { display: non
   only a Latin sigil + PG/CCL locator ("In Matthaeum", "In Epistulam ad Romanos")
   surface as their own title-as-author nodes; attribute the famous ones case by
   case in `works.py` (needs the PG/source number to be sure — don't guess).
+- All recognised layer-2 documents now parse (Vatican II, curia documents,
+  Compendium); the four-era parser is documented in "Layer-2 crawl" above.
 - The build needs **scipy** (`networkx.spring_layout` switches to a sparse solver
-  above ~500 nodes). `compute_layout` runs ~30 s at ~1.9k nodes (build-time only);
-  lower `iterations` in `layout.py` if it gets painful.
+  above ~500 nodes). `compute_layout` runs ~30 s at ~1.9k nodes and ~2–3 min
+  at ~5k nodes (build-time only); lower `iterations` in `layout.py` if painful.
 - Not yet: papalencyclicals.net adapter for older texts; graph analytics
   (centrality/lineage); per-document pages; Cloudflare deploy.
 

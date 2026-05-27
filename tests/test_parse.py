@@ -1,4 +1,11 @@
-from pipeline import graph, parse, scripture
+"""Unit tests for the parser.
+
+Seed-level regression coverage lives in ``tests/regression/`` — those lock the
+full parsed shape of every SEED, so any drift on real corpus data fails loudly
+there. The tests below pin small, inline-fixture behaviours we want to keep
+true regardless of corpus changes.
+"""
+from pipeline import graph, normalize, parse, scripture
 
 # A minimal stand-in for the Vatican Word-export structure: a canonical link,
 # a title, an inline scripture ref, and three footnotes including an "ibid.".
@@ -354,3 +361,136 @@ def test_graph_build_and_dedup():
     assert len(cites_edges) == 1 and cites_edges[0]["weight"] == 2
     # every node carries layout-free graph data; coords added by layout step only
     assert g["meta"]["scripture"] == 1
+
+
+# --- New layer-2-enabling behaviours ------------------------------------------
+
+# EG / w2.vatican.va use absolute hrefs in the back-link instead of bare "#…"
+# fragments. Lock down that both shapes are accepted.
+ABSOLUTE_HREF_FIXTURE = """
+<html><head><title>Apostolic Exhortation of Pope X Test Doc</title>
+<link rel="canonical" href="https://www.vatican.va/content/x/en/apost_exhortations/documents/test.html"/>
+</head><body>
+  <p>Body.</p>
+  <p><a name="_ftn1" href="/content/x/en/apost_exhortations/documents/test.html#_ftnref1">[1]</a>
+     Saint Augustine, <i>Confessions</i>, X, 27.</p>
+</body></html>
+"""
+
+
+def test_anchor_notes_accept_absolute_href():
+    doc = parse.parse_document(
+        ABSOLUTE_HREF_FIXTURE,
+        "https://www.vatican.va/content/x/en/apost_exhortations/documents/test.html",
+    )
+    assert doc.footnote_count == 1
+    assert doc.citations[0].author == "Saint Augustine"
+
+
+def test_w2_host_canonicalized_to_www():
+    # A citation pointing at w2.vatican.va must produce the same doc_key as
+    # a citation pointing at www.vatican.va for the same path.
+    w2 = "https://w2.vatican.va/content/x/en/encyclicals/documents/foo.html"
+    www = "https://www.vatican.va/content/x/en/encyclicals/documents/foo.html"
+    assert normalize.doc_key_from_url(w2) == normalize.doc_key_from_url(www)
+
+
+def test_catechism_urls_collapse_to_one_key():
+    base = "https://www.vatican.va/archive/ENG0015/"
+    keys = {normalize.doc_key_from_url(base + p) for p in
+            ("_INDEX.HTM", "__P18.HTM", "__P1C.HTM", "__P2W.HTM", "__P6G.HTM")}
+    assert keys == {"doc:catechism-of-the-catholic-church"}
+
+
+# --- Vatican II-shaped notes (section-restarting numbering) -------------------
+
+VAT_II_FIXTURE = """
+<html><head>
+  <title>Pastoral Constitution Gaudium et Spes (7 December 1965)</title>
+  <link rel="canonical" href="https://www.vatican.va/archive/hist_councils/ii_vatican_council/documents/vat-ii_const_19651207_gaudium-et-spes_en.html"/>
+</head><body>
+  <p>Body of the constitution.</p>
+  <hr/>
+  <p><b>NOTES</b></p>
+  <p>Preface</p>
+  <p>1. The Pastoral Constitution is made up of two parts.</p>
+  <p>2. Cf. <i>John</i> 18:37; <i>Matt</i>. 20:28.</p>
+  <p>Introduction</p>
+  <p>1. Cf. <i>Rom</i>. 7:14 ff.</p>
+  <p>2. Cf. <i>2 Cor</i>. 5:15.</p>
+  <p>PART I</p>
+  <p>Chapter I</p>
+  <p>16. Cf. Pius XI, encyclical letter <i><a href="/holy_father/pius_xi/encyclicals/documents/hf_p-xi_enc_19031937_divini-redemptoris_en.html">Divini Redemptoris</a></i>, March 19, 1937: AAS 29 (1937), pp. 65-106.</p>
+</body></html>
+"""
+
+
+def test_vatican_ii_section_notes():
+    # Anchor-based parser sees nothing; the NOTES-header strategy must kick in
+    # and pick up notes across section boundaries, even with resets (Preface 1,
+    # 2 → Introduction 1, 2 → Chapter I 16).
+    doc = parse.parse_document(
+        VAT_II_FIXTURE,
+        "https://www.vatican.va/archive/hist_councils/ii_vatican_council/documents/vat-ii_const_19651207_gaudium-et-spes_en.html",
+    )
+    # Five notes total: Preface 1, 2; Introduction 1, 2; Chapter I 16.
+    # Section headers ("Preface", "PART I", "Chapter I") have no leading
+    # digit and must not be picked up.
+    assert doc.footnote_count == 5
+    # The one work-citing note must yield a Citation with the right link.
+    by_url = [c for c in doc.citations if c.url and "divini-redemptoris" in c.url]
+    assert len(by_url) == 1
+    assert by_url[0].title == "Divini Redemptoris"
+    assert by_url[0].author == "Pius XI"
+
+
+def test_section_notes_skipped_when_anchors_present():
+    # Even if a document happened to contain the word "NOTES" in its body, the
+    # anchor-based result must win — the fallback only fires when both prior
+    # strategies return empty.
+    fixture = FIXTURE.replace("<p>The truth", "<p><b>NOTES</b></p><p>The truth")
+    doc = parse.parse_document(fixture, URL)
+    # Same as the baseline anchor-based test: 3 footnotes, no extras pulled
+    # from the spurious NOTES region.
+    assert doc.footnote_count == 3
+
+
+# --- Bracket-numbered notes ("[N] …" one-per-<p>, Compendium-style) -----------
+
+BRACKET_FIXTURE_HEAD = """
+<html><head>
+  <title>Compendium</title>
+  <link rel="canonical" href="https://www.vatican.va/roman_curia/pontifical_councils/justpeace/documents/rc_pc_justpeace_doc_20060526_compendio-dott-soc_en.html"/>
+</head><body>
+  <p>Body of the work, with one stray <b>[1]</b> reference inline.</p>
+"""
+BRACKET_URL = "https://www.vatican.va/roman_curia/pontifical_councils/justpeace/documents/rc_pc_justpeace_doc_20060526_compendio-dott-soc_en.html"
+
+
+def _bracket_fixture(n: int) -> str:
+    body = "".join(
+        f'<p>[{i}] Cf. John Paul II, Encyclical Letter '
+        f'<i><a href="/content/john-paul-ii/en/encyclicals/documents/'
+        f'hf_jp-ii_enc_01051991_centesimus-annus.html">Centesimus Annus</a></i>, '
+        f'{i}.</p>'
+        for i in range(1, n + 1)
+    )
+    return BRACKET_FIXTURE_HEAD + body + "</body></html>"
+
+
+def test_bracket_notes_accepted_when_run_is_long():
+    # 25 consecutive '[N] …' paragraphs in ascending order trigger the strategy.
+    doc = parse.parse_document(_bracket_fixture(25), BRACKET_URL)
+    assert doc.footnote_count == 25
+    # Each note cites the same work, so we have 25 cites all targeting one node.
+    targets = {c.target_key for c in doc.citations}
+    assert len(targets) == 1
+    assert doc.citations[0].title == "Centesimus Annus"
+
+
+def test_bracket_notes_rejected_when_run_is_short():
+    # 5 such paragraphs is below the threshold — bracket strategy must not
+    # fire (otherwise a few stray '[N]' references in body prose would create
+    # ghost citations from non-note documents).
+    doc = parse.parse_document(_bracket_fixture(5), BRACKET_URL)
+    assert doc.footnote_count == 0

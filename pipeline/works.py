@@ -78,6 +78,13 @@ _WORKS_RAW: list[tuple[str, str, str, str]] = [
     ("familiaris consortio",      "Familiaris Consortio",        "John Paul II", "Apostolic Exhortation"),
     ("donum vitae",               "Donum Vitae",                 "Congregation for the Doctrine of the Faith", "Instruction"),
     ("immortale dei",             "Immortale Dei",               "Leo XIII", "Encyclical"),
+    # The Catechism of the Catholic Church. Promulgated by Saint John Paul II
+    # (Fidei Depositum, 1992); its 5-URL deep-link family is folded onto one
+    # doc_key in ``normalize.doc_key_from_url`` — this entry then attaches the
+    # correct authorship so the merged node doesn't inherit a stale label or
+    # type from whichever footnote happened to register it first.
+    ("catechism of the catholic church", "Catechism of the Catholic Church",
+                                  "Catholic Church", "Catechism"),
     ("das ende der neuzeit",      "Das Ende der Neuzeit",        "Romano Guardini", "Philosophical work"),
     # Classical & literary
     ("aeneid",                    "Aeneid",                      "Virgil", "Epic poem"),

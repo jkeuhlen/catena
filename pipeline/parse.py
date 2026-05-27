@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
-from . import normalize, scripture, works
+from . import bodies, normalize, scripture, works
 
 # Italic tokens that are never a work title (citation apparatus, not works).
 # "Ep" / "Hom" are the Latin work-form abbreviations (Epistula, Homilia) that
@@ -90,11 +90,21 @@ def _canonical_url(soup: BeautifulSoup, source_url: str) -> str:
     if isinstance(link, Tag):
         href = link.get("href")
         if isinstance(href, str) and href:
-            return href.replace("http://", "https://")
+            return _normalize_host(href)
     og = _meta_content(soup, property="og:url")
     if og:
-        return og.replace("http://", "https://")
-    return source_url
+        return _normalize_host(og)
+    return _normalize_host(source_url)
+
+
+def _normalize_host(url: str) -> str:
+    """Force https + ``www.vatican.va``. The legacy ``w2.vatican.va`` host serves
+    the same documents at the same paths; collapsing it here means a footnote
+    citing ``w2.…/lumen-fidei.html`` lands on the same node as the same work
+    cited from ``www.…``. Hard-coded because it's the only host alias we see."""
+    return (url
+            .replace("http://", "https://")
+            .replace("https://w2.vatican.va", "https://www.vatican.va"))
 
 
 def _document_links(p: Tag) -> list[tuple[str, str]]:
@@ -104,6 +114,11 @@ def _document_links(p: Tag) -> list[tuple[str, str]]:
     for a in p.find_all("a", href=True):
         href = a["href"]
         if not isinstance(href, str) or href.startswith("#"):
+            continue
+        # Modern Vatican pages embed the note's own back-link as an absolute URL
+        # ("/content/.../doc.html#_ftnrefN") — it looks like a document link but
+        # is really apparatus pointing back to the body. Drop those.
+        if re.search(r"#_(?:ftn|edn)ref\d+", href):
             continue
         if not normalize.is_document_url(href):
             continue
@@ -187,7 +202,7 @@ def _first_title(p: Tag) -> str | None:
 
 
 def _footnote_number(p: Tag) -> int | None:
-    back = p.find("a", href=re.compile(r"^#_(?:ftn|edn)ref\d+"))
+    back = p.find("a", href=re.compile(r"#_(?:ftn|edn)ref\d+"))
     if not isinstance(back, Tag):
         return None
     href = back.get("href", "")
@@ -357,10 +372,16 @@ def _canonicalize(c: Citation) -> Citation:
 
 def _parse_metadata(soup: BeautifulSoup, source_url: str) -> dict:
     url = _canonical_url(soup, source_url)
-    # pope slug: /content/<pope>/... ; fall back to a generic author.
-    slug_m = re.search(r"/content/([^/]+)/", url) or re.search(r"/([a-z-]+)/[a-z_]+/documents/", url)
-    pope_slug = slug_m.group(1) if slug_m else "unknown"
-    author = _pope_from_slug(pope_slug)
+    # Author resolution: curial / conciliar bodies first (their URLs name the
+    # authoring entity, not a pope), then the ``/content/<pope-slug>/`` pattern,
+    # then a generic fallback so missing-slug cases don't crash the parse.
+    body = bodies.lookup_by_url(url)
+    if body is not None:
+        author = body
+    else:
+        slug_m = (re.search(r"/content/([^/]+)/", url)
+                  or re.search(r"/([a-z-]+)/[a-z_]+/documents/", url))
+        author = _pope_from_slug(slug_m.group(1) if slug_m else "unknown")
     author_key, author = normalize.normalize_author(author)
 
     raw_title = soup.title.get_text(" ", strip=True) if soup.title else ""
@@ -419,9 +440,13 @@ def _anchor_notes(soup: BeautifulSoup) -> list[tuple[int, Tag]]:
     anchor, not the class."""
     out: list[tuple[int, Tag]] = []
     seen: set[int] = set()
+    # Older modern pages give the back-link a bare fragment ("#_ftnrefN"); newer
+    # pages (Evangelii Gaudium and the w2.vatican.va host) ship the absolute URL
+    # of the page with the fragment appended ("/content/.../doc.html#_ftnrefN").
+    # Match the fragment wherever it sits so both shapes are recognised.
     for a in soup.find_all("a", attrs={"name": re.compile(r"^_(?:ftn|edn)\d+$")}):
         href = a.get("href", "")
-        if not (isinstance(href, str) and href.startswith(("#_ftnref", "#_ednref"))):
+        if not (isinstance(href, str) and re.search(r"#_(?:ftn|edn)ref\d+", href)):
             continue
         block = a.find_parent("p") or a.parent
         if not isinstance(block, Tag) or id(block) in seen:
@@ -520,9 +545,86 @@ def _legacy_notes(html: str) -> list[tuple[int, Tag]]:
     return notes
 
 
+_SECTION_NOTE_MARKER = re.compile(r"^\s*(\d{1,3})\s*[.\s]")
+
+
+def _section_notes(soup: BeautifulSoup) -> list[tuple[int, Tag]]:
+    """Vatican II-era notes: a ``<p>NOTES</p>`` header followed by per-chapter
+    sub-headings interleaved with one ``<p>`` per note, the note number leading
+    the paragraph ("1. The Pastoral…", "16. Cf. Pius XI…"). The numbering
+    *resets* at every chapter — neither anchor-based nor the monotonic-counter
+    legacy split copes with that, so we walk paragraphs after the NOTES header
+    and accept any ``<p>`` that opens with a small integer as a note. Chapter
+    headers ("Preface", "PART I", "Chapter I") have no leading digit and are
+    skipped naturally. Duplicate footnote IDs across sections are accepted —
+    the rest of the pipeline keys on ``target_key``, not ``footnote``.
+    """
+    header = None
+    for p in soup.find_all("p"):
+        if p.get_text(strip=True).upper() == "NOTES":
+            header = p
+            break
+    if header is None:
+        return []
+    out: list[tuple[int, Tag]] = []
+    for p in header.find_all_next("p"):
+        m = _SECTION_NOTE_MARKER.match(p.get_text(" ", strip=True))
+        if m:
+            out.append((int(m.group(1)), p))
+    # Discriminator: in real Vat II layout every section starts at 1, so the
+    # *first* matched note must be 1. Pre-2000 encyclicals (Populorum
+    # Progressio) also use a centered "NOTES" header, but their notes are
+    # crammed into one paragraph with "(N)" markers — leading-digit ``<p>``
+    # tags after their NOTES heading are stray body locators ("14)", "23)"),
+    # not real first-of-section notes. Bailing here keeps those out and lets
+    # the legacy strategy do its job.
+    if not out or out[0][0] != 1:
+        return []
+    return out
+
+
+_BRACKET_NOTE_MARKER = re.compile(r"^\s*\[(\d{1,4})\]")
+
+
+def _bracket_notes(soup: BeautifulSoup) -> list[tuple[int, Tag]]:
+    """Bracket-numbered notes laid out one-per-``<p>`` ("[N] Citation text…").
+
+    The Compendium of the Social Doctrine of the Church ships its 1232 notes
+    in this shape — no anchors, no ``<p>NOTES</p>`` heading, no ``<hr>``
+    boundary; just a long contiguous run of ``<p>[N] …</p>`` tags at the
+    end of the file. We collect every ``<p>`` whose first text is a bracketed
+    integer, then accept the result only when it forms a long, monotonically
+    non-decreasing sequence — stray ``[1]`` tokens in body prose (paragraph
+    references, quoted brackets) don't accumulate to dozens of paragraphs in
+    document order.
+    """
+    candidates: list[tuple[int, Tag]] = []
+    for p in soup.find_all("p"):
+        m = _BRACKET_NOTE_MARKER.match(p.get_text(" ", strip=True))
+        if m:
+            candidates.append((int(m.group(1)), p))
+    if len(candidates) < 20:
+        return []
+    nums = [n for n, _ in candidates]
+    if any(b < a for a, b in zip(nums, nums[1:])):
+        return []
+    return candidates
+
+
 def _collect_notes(soup: BeautifulSoup, html: str) -> list[tuple[int, Tag]]:
-    """All notes as (number, block) pairs: modern anchors, else the legacy split."""
-    return _anchor_notes(soup) or _legacy_notes(html)
+    """All notes as (number, block) pairs.
+
+    Tries each era's strategy in turn and uses the first non-empty result.
+    Order matters: more specific strategies first so a weaker strategy can't
+    partial-match and mask a better one. The ``<p>NOTES</p>``-anchored Vat II
+    layout precedes the legacy split for that reason; the bracket layout sits
+    after both because its discriminator (≥20 ascending ``[N]``-led paragraphs)
+    is positive enough to be safe wherever it fires.
+    """
+    return (_anchor_notes(soup)
+            or _section_notes(soup)
+            or _bracket_notes(soup)
+            or _legacy_notes(html))
 
 
 def parse_document(html: str, source_url: str) -> ParsedDocument:

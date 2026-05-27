@@ -73,13 +73,30 @@ class GraphBuilder:
         canonical = self._title_index.get(_norm_title(c.title))
         return canonical or c.target_key
 
-    def add_document(self, doc: ParsedDocument) -> None:
-        self._node(
+    def add_document(self, doc: ParsedDocument, *, is_source: bool = True) -> None:
+        # ``is_source`` distinguishes seeds (the curated corpus the visualisation
+        # is *about*) from recursively-parsed layer-2 docs. Both get
+        # ``in_corpus=True`` so they receive outgoing edges from their own
+        # citations; only seeds get the eyebrow/legend treatment as sources.
+        node = self._node(
             doc.doc_key, "document",
             label=doc.title, title=doc.title, author=doc.author,
             author_key=doc.author_key, doc_type=doc.doc_type, url=doc.url,
-            date=doc.date, in_corpus=True, is_source=True,
+            date=doc.date, in_corpus=True, is_source=is_source,
         )
+        # The fill-only merge in ``_node`` is right for *citations* (a curated
+        # value mustn't be clobbered by stale apparatus reaching the same node
+        # via a different footnote), but wrong for the document we just parsed:
+        # we have authoritative metadata for it, so overwrite the bibliographic
+        # fields with parsed truth. (E.g. a footnote that mis-labels Fides et
+        # Ratio as "Populorum Progressio" otherwise sticks as the node label.)
+        node["label"] = doc.title
+        node["title"] = doc.title
+        node["author"] = doc.author
+        node["author_key"] = doc.author_key
+        node["doc_type"] = doc.doc_type
+        node["url"] = doc.url
+        node["date"] = doc.date
         if doc.author_key:
             aid = f"author:{doc.author_key}"
             self._node(aid, "author", label=doc.author, name=doc.author)
@@ -139,11 +156,21 @@ class GraphBuilder:
         }
 
 
-def build_graph(docs: list[ParsedDocument]) -> dict:
+def build_graph(
+    docs: list[ParsedDocument],
+    *,
+    layer2: list[ParsedDocument] | None = None,
+) -> dict:
+    """Assemble the graph. ``docs`` are seeds (is_source=True); the optional
+    ``layer2`` is the depth-1 crawl of works the seeds cite (is_source=False).
+    """
     gb = GraphBuilder()
-    gb.index_titles(docs)
+    all_docs = docs + (layer2 or [])
+    gb.index_titles(all_docs)
     for doc in docs:
-        gb.add_document(doc)
+        gb.add_document(doc, is_source=True)
+    for doc in (layer2 or []):
+        gb.add_document(doc, is_source=False)
     graph = gb.finalize()
     graph["meta"] = {
         "documents": sum(1 for n in graph["nodes"] if n["type"] == "document"),

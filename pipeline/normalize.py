@@ -161,8 +161,16 @@ def doc_key_from_url(url: str) -> str:
     removed, e.g. ``vat-ii_const_19651207_gaudium-et-spes`` for any language
     edition of Gaudium et Spes. Also collapses the ``_cons_`` typo (seen on
     one Gaudium et Spes URL) onto the standard ``_const_`` form.
+
+    Special case: the Catechism of the Catholic Church is served as five
+    deep-linked HTML pages (``/archive/ENG0015/__P*.HTM``) corresponding to its
+    four parts plus the index. Citations land on different fragments depending
+    on which paragraph is cited, but they all reference the *same work* — so
+    we collapse the whole URL family onto one node.
     """
     path = urlparse(url).path
+    if "/archive/ENG0015/" in path:
+        return "doc:catechism-of-the-catholic-church"
     stem = path.rsplit("/", 1)[-1]
     stem = re.sub(r"\.(html?|HTML?)$", "", stem)
     stem = _LANG_SUFFIX.sub("", stem)
