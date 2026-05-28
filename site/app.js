@@ -752,6 +752,76 @@ function bindEvents() {
     dirty = true;
   }, { passive: false });
 
+  // ---- touch: one-finger pan/tap, two-finger pinch-zoom ----------------
+  // No hover on touch; a finger drag pans both axes (the natural way to scroll
+  // the timeline, replacing the wheel), and pinch zooms anchored at the
+  // midpoint. clampCamera keeps the chronological views in bounds.
+  let tMoved = false, pinching = false;
+  let tLastX = 0, tLastY = 0;                 // one-finger pan anchor
+  let pinchDist = 0, pinchMX = 0, pinchMY = 0; // two-finger state
+  const touchPt = (t) => {
+    const rect = canvas.getBoundingClientRect();
+    return [t.clientX - rect.left, t.clientY - rect.top];
+  };
+
+  canvas.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) {
+      pinching = false; tMoved = false;
+      [tLastX, tLastY] = touchPt(e.touches[0]);
+    } else if (e.touches.length === 2) {
+      pinching = true; tMoved = true;
+      const [ax, ay] = touchPt(e.touches[0]);
+      const [bx, by] = touchPt(e.touches[1]);
+      pinchDist = Math.hypot(ax - bx, ay - by) || 1;
+      pinchMX = (ax + bx) / 2; pinchMY = (ay + by) / 2;
+    }
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (e.touches.length >= 2) {
+      const [ax, ay] = touchPt(e.touches[0]);
+      const [bx, by] = touchPt(e.touches[1]);
+      const dist = Math.hypot(ax - bx, ay - by) || 1;
+      const mx = (ax + bx) / 2, my = (ay + by) / 2;
+      // two-finger drag pans by the midpoint translation
+      cam.x -= (mx - pinchMX) / cam.scale;
+      cam.y -= (my - pinchMY) / cam.scale;
+      // pinch ratio zooms, keeping the world point under the midpoint anchored
+      const [wx, wy] = toWorld(mx, my);
+      cam.scale = Math.max(0.05, Math.min(8, cam.scale * (dist / pinchDist)));
+      const [sx, sy] = toScreen(wx, wy);
+      cam.x += (mx - sx) / -cam.scale;
+      cam.y += (my - sy) / -cam.scale;
+      pinchDist = dist; pinchMX = mx; pinchMY = my;
+      clampCamera(); dirty = true;
+      return;
+    }
+    if (e.touches.length === 1 && !pinching) {
+      const [x, y] = touchPt(e.touches[0]);
+      const dx = x - tLastX, dy = y - tLastY;
+      if (Math.abs(dx) + Math.abs(dy) > 2) tMoved = true;
+      cam.x -= dx / cam.scale;
+      cam.y -= dy / cam.scale;
+      clampCamera();
+      tLastX = x; tLastY = y; dirty = true;
+    }
+  }, { passive: false });
+
+  canvas.addEventListener("touchend", (e) => {
+    // a clean single tap (no drag, no pinch) selects the node under the finger
+    if (!tMoved && !pinching && e.changedTouches.length) {
+      const [x, y] = touchPt(e.changedTouches[0]);
+      toggleSelect(nodeAt(x, y));   // null (empty space) clears the selection
+    }
+    if (e.touches.length === 0) pinching = false;
+    // lifting one of two fingers: re-anchor the survivor for pan, don't tap
+    if (e.touches.length === 1) {
+      pinching = false; tMoved = true;
+      [tLastX, tLastY] = touchPt(e.touches[0]);
+    }
+  }, { passive: false });
+
   // closing the detail panel hides it but keeps the pinned selection
   document.getElementById("detail-close").addEventListener("click", () => {
     detailNode = null; detailFilters.clear();
