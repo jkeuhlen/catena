@@ -155,8 +155,24 @@ from each author node's `span` field (`graph.finalize`, from `pontiffs`/
 (reign/life/council zones, edge→swarm), deduped across the fragmented council
 author keys, and clickable (pins the author node → lights the encyclicals citing
 it). Figures whose whole span predates the axis window (most Fathers) collect
-into an "earlier" stack at the top of the gutter. To add/fix a date, edit
+into an "earlier" stack at the top of the gutter (below the search/stats rail,
+left of the band lanes; hidden under 700px). To add/fix a date, edit
 `pipeline/lifespans.py` (the curated extension point) and `make build`.
+Three more Timeline rules: the default frame **fits the whole axis** (that frame
+is the shareable poster — the zoom floor in `clampCamera` lands exactly on it);
+**ambient edges fade out as you zoom out** (`edgeFade` — tier-2 hover/pin
+threads are exempt, so tracing works at any zoom); and **sources are always
+labelled** via `drawStackedSourceLabels`, which greedily de-overlaps crowded
+labels downward with leader lines back to their dots.
+
+**Sharing:** the URL hash mirrors full view state — `#view=…&sel=…&cam=…` —
+written on selection/view change and (debounced) after the camera settles;
+node ids are percent-encoded individually because they contain `,` and `|`
+(don't parse with URLSearchParams — it decodes too early). "Copy link" copies
+it; "Save image" composes the canvas + painted masthead/footer into a 2× PNG
+poster (`exportImage`). `?still=1` skips every animation and lands on the
+settled frame — headless-Chrome screenshots (`make preview`) rely on it, since
+virtual time races the rAF tweens.
 
 **CSS gotcha (bitten 3×):** a class with an explicit `display` beats the `[hidden]`
 attribute's `display:none`. Any element toggled via `el.hidden = true` that also

@@ -119,10 +119,32 @@ async function init() {
   buildSearch();
   buildLegend();
   buildViewSwitcher();
+  buildShare();
   resize();
   fitToContent();
   bindEvents();
-  readHashView();   // restore #view=… on load
+  readHash();   // restore #view=…&sel=…&cam=… on load
+
+  // ?still — skip every animation and land on the settled frame. Headless
+  // Chrome screenshots (make preview, social cards) use this: virtual time
+  // and the rAF-driven tweens otherwise race the capture.
+  const still = new URLSearchParams(window.location.search).has("still");
+  if (still) {
+    tween = null;
+    viewTween = null;
+    if (!hashHadCam) {
+      const frame = frameForView(state.view);
+      cam.x = frame.x; cam.y = frame.y; cam.scale = frame.scale;
+      clampCamera();
+    }
+    const T = targets[state.view];
+    for (const n of nodes) {
+      const to = T.get(n.id);
+      if (to) { n._x = to.x; n._y = to.y; n._op = to.op; }
+    }
+  }
+  // seed the settle-watcher so the initial frame doesn't count as a camera move
+  camWatch.x = cam.x; camWatch.y = cam.y; camWatch.s = cam.scale;
 
   // entrance
   const loading = document.getElementById("loading");
@@ -130,7 +152,7 @@ async function init() {
   setTimeout(() => loading.remove(), 800);
   const t0 = performance.now();
   (function step(t) {
-    intro = Math.min(1, (t - t0) / 1400);
+    intro = still ? 1 : Math.min(1, (t - t0) / 1400);
     dirty = true;
     draw();
     if (intro < 1) requestAnimationFrame(step);
@@ -143,7 +165,15 @@ async function init() {
     tickPositions(t);
     if (pulse && t - pulse.t0 < PULSE_MS) dirty = true;
     if (dirty) draw();
-    // the in-canvas time axis redraws each frame; no DOM ruler to update.
+    // permalink: once the camera has settled for half a second, mirror it to
+    // the URL so the address bar always links to the current frame.
+    if (cam.x !== camWatch.x || cam.y !== camWatch.y || cam.scale !== camWatch.s) {
+      camWatch.x = cam.x; camWatch.y = cam.y; camWatch.s = cam.scale;
+      camWatch.t = t; camWatch.pending = true;
+    } else if (camWatch.pending && t - camWatch.t > 500) {
+      camWatch.pending = false;
+      writeHash();
+    }
     requestAnimationFrame(loop);
   });
 }
@@ -218,6 +248,12 @@ function draw() {
   // When nothing is pinned, hovered/filter-only highlights fall through tier 1.
   const focusIds = selectedIds.size ? selectedIds
                  : (hovered && !activeFilters.size && !detailNode ? new Set([hovered.id]) : null);
+  // Chronological views zoomed out: thousands of long arcs along the spine
+  // smear into a hairball, so ambient edges (tiers 0-1) fade with zoom and
+  // vanish entirely at the fit-everything frame. Tier-2 threads (incident to
+  // a hover/pin) are exempt — tracing still works at any zoom.
+  const edgeFade = state.view === "explore" ? 1
+    : Math.max(0, Math.min(1, (cam.scale - 0.3) / 0.4));
   const tiers = [[], [], []];
   for (const e of edges) {
     const on = lit(e.source) && lit(e.target);
@@ -226,6 +262,7 @@ function draw() {
     tiers[tier].push(e);
   }
   for (let t = 0; t < 3; t++) {
+    if (t < 2 && edgeFade <= 0.02) continue;
     for (const e of tiers[t]) {
       const a = nodeById.get(e.source), b = nodeById.get(e.target);
       const [ax, ay] = toScreen(a._x, a._y), [bx, by] = toScreen(b._x, b._y);
@@ -233,8 +270,8 @@ function draw() {
       const col = colorOf(tgt.is_source ? a : tgt);
       const baseAlpha = e.type === "cites" ? 0.22 : 0.13;
       let alpha, width;
-      if (t === 0)      { alpha = highlight ? 0.012 : baseAlpha; width = 0.7; }
-      else if (t === 1) { alpha = baseAlpha * 0.9;               width = 1.1; }
+      if (t === 0)      { alpha = (highlight ? 0.012 : baseAlpha) * edgeFade; width = 0.7; }
+      else if (t === 1) { alpha = baseAlpha * 0.9 * edgeFade;                 width = 1.1; }
       else              { alpha = Math.min(0.95, baseAlpha * 2.6); width = 1.7; }
       // edges fade with whichever endpoint is more hidden — keeps the threads
       // from being visible while their nodes are gone in Timeline.
@@ -297,9 +334,10 @@ function draw() {
   ctx.textBaseline = "middle";
   // In the chronological views the per-year swarm gets crowded fast, so we
   // suppress the "always-label big works" rule and let users surface labels
-  // by zooming, hovering, or selecting. Sources stay labelled — they're the
-  // narrative spine of the view.
+  // by zooming, hovering, or selecting. Sources stay labelled at every zoom —
+  // they're the narrative spine of the view — via the de-overlap pass below.
   const inChrono = state.view !== "explore";
+  const stackedSources = [];
   for (const n of nodes) {
     const big = n.type === "document" && n.degree >= 16;
     const isSel = selectedIds.has(n.id);
@@ -307,17 +345,18 @@ function draw() {
     const member = highlight && highlight.has(n.id);
     const neighbourLabel = smallNeighbourhood && member && selectedIds.size <= 1;
     const filterLabel = activeFilters.size && member && n.degree >= 12;
-    const ambientLabel = inChrono
-      ? (n.is_source && cam.scale > 0.45)        // sources only, and only once zoomed in a bit
-      : (big && (!highlight || member));
-    const show = isSel || isBridge || n === hovered || n === detailNode ||
-                 neighbourLabel || filterLabel || ambientLabel;
+    const emphatic = isSel || isBridge || n === hovered || n === detailNode;
+    if (inChrono && n.is_source && !emphatic) {
+      if ((n._op ?? 1) > 0.01) stackedSources.push(n);
+      continue;
+    }
+    const ambientLabel = !inChrono && big && (!highlight || member);
+    const show = emphatic || neighbourLabel || filterLabel || ambientLabel;
     if (!show) continue;
     if ((n._op ?? 1) <= 0.01) continue;
     const [x, y] = toScreen(n._x, n._y);
     const r = radius(n);
     const label = n.label || n.id;
-    const emphatic = isSel || isBridge || n === hovered || n === detailNode;
     const size = n.is_source ? 19 : (big || emphatic) ? 14.5 : 13;
     ctx.font = `${n.is_source || isSel ? 600 : 500} ${size}px "Cormorant Garamond", serif`;
     const alpha = (emphatic ? 1 : 0.75) * intro * (n._op ?? 1);
@@ -326,6 +365,7 @@ function draw() {
     ctx.fillStyle = hexA(isSel ? "#f7ead0" : n.is_source ? "#f4e4bd" : "#ece2cd", alpha);
     ctx.fillText(label, x + r + 6, y);
   }
+  if (stackedSources.length) drawStackedSourceLabels(stackedSources);
 
   // chronological context ribbon (reigns / councils / lifetimes) on the right
   if (state.view !== "explore") drawTimelineRibbons(W, H);
@@ -386,6 +426,48 @@ function drawTimeAxis(W, H) {
     ctx.font = `${major ? 600 : 500} ${major ? 13 : 11}px "Cormorant Garamond", serif`;
     ctx.fillStyle = `rgba(${major ? "244,228,189" : "182,169,136"},${major ? 0.85 : 0.55})`;
     ctx.fillText(`${y}`, px, sy);
+  }
+}
+
+// Chronological views label every source encyclical at any zoom — they're
+// what a shared screenshot needs to say. Zoomed out, the modern pontificates
+// pack several sources into a few pixels, so labels greedily stack downward
+// with a thin leader back to their dot.
+function drawStackedSourceLabels(list) {
+  const H = canvas.clientHeight;
+  const fs = cam.scale < 0.45 ? 12.5 : 19;
+  const gap = fs + 4;
+  const pts = [];
+  for (const n of list) {
+    const [x, y] = toScreen(n._x, n._y);
+    if (y < -40 || y > H + 40) continue;
+    pts.push({ n, x, y });
+  }
+  pts.sort((a, b) => a.y - b.y);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  let prev = -1e9;
+  for (const p of pts) {
+    const ly = Math.max(p.y, prev + gap);
+    prev = ly;
+    const lit = !highlight || highlight.has(p.n.id);
+    const alpha = (lit ? 0.95 : 0.3) * intro * (p.n._op ?? 1);
+    const r = radius(p.n);
+    const lx = p.x + r + 8;
+    if (ly - p.y > 4) {                  // nudged off its dot — draw a leader
+      ctx.strokeStyle = hexA("#d8b65f", 0.4 * alpha);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(p.x + r + 2, p.y);
+      ctx.lineTo(lx - 3, ly);
+      ctx.stroke();
+    }
+    ctx.font = `600 ${fs}px "Cormorant Garamond", serif`;
+    const label = p.n.label || p.n.id;
+    ctx.fillStyle = hexA("#0c0a07", 0.85 * alpha);
+    ctx.fillText(label, lx + 0.6, ly + 0.6);
+    ctx.fillStyle = hexA("#f4e4bd", alpha);
+    ctx.fillText(label, lx, ly);
   }
 }
 
@@ -626,7 +708,7 @@ function buildTimelineRibbons() {
     base += Math.max(laneEnds.length, kind === "council" ? 0 : 1);
   }
   ancient.sort((a, b) => a.start - b.start);
-  timelineRibbons = { bands: inWin, ancient, zoneBase };
+  timelineRibbons = { bands: inWin, ancient, zoneBase, lanes: base };
 }
 
 const RIBBON_PITCH = 20;     // px between lanes
@@ -638,8 +720,18 @@ const yearToScreenY = (year) => toScreen(0, yearToY(year))[1];
 
 function drawTimelineRibbons(W, H) {
   ribbonHits = [];
-  const { bands, ancient, zoneBase } = timelineRibbons;
+  const { bands, ancient, zoneBase, lanes } = timelineRibbons;
   const edge = W - RIBBON_EDGE;
+  // A dark wash behind the gutter separates the band stack and its labels
+  // from the swarm and its threads.
+  const compact = W < 700;       // phones: bands only — no room for the stack
+  const gw = RIBBON_EDGE + (lanes || 0) * RIBBON_PITCH + RIBBON_W + (compact ? 36 : 240);
+  const wash = ctx.createLinearGradient(W - gw, 0, W, 0);
+  wash.addColorStop(0, "rgba(12,10,7,0)");
+  wash.addColorStop(0.6, "rgba(12,10,7,0.45)");
+  wash.addColorStop(1, "rgba(12,10,7,0.66)");
+  ctx.fillStyle = wash;
+  ctx.fillRect(W - gw, 0, gw, H);
   const litNode = (n) => !highlight || highlight.has(n.id);
 
   for (const b of bands) {
@@ -685,20 +777,25 @@ function drawTimelineRibbons(W, H) {
   }
 
   // "earlier" stack — Fathers whose lifetimes predate the axis window.
-  if (ancient.length) {
+  // Starts below the search/stats rail and right-aligns just left of the band
+  // lanes: it used to render beneath the translucent rail panel and under the
+  // bands themselves, reading as overlapping clutter.
+  if (ancient.length && !compact) {
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    let yy = 96;
+    const rail = document.querySelector(".rail");
+    const textEdge = edge - (lanes || 0) * RIBBON_PITCH - RIBBON_W - 6;
+    let yy = Math.max(96, rail ? rail.getBoundingClientRect().bottom + 26 : 0);
     const rowH = 17;
     ctx.font = `600 11px "Cormorant Garamond", serif`;
     ctx.fillStyle = hexA("#b6a988", 0.6 * intro);
-    ctx.fillText("· earlier ·", edge, yy);
+    ctx.fillText("· earlier ·", textEdge, yy);
     yy += rowH + 2;
     for (const b of ancient) {
       if (yy > H - 24) {
         ctx.fillStyle = hexA("#b6a988", 0.5 * intro);
         ctx.font = `500 11px "Cormorant Garamond", serif`;
-        ctx.fillText("…", edge, yy);
+        ctx.fillText("…", textEdge, yy);
         break;
       }
       const hot = selectedIds.has(b.node.id) || ribbonHover === b.node;
@@ -707,8 +804,8 @@ function drawTimelineRibbons(W, H) {
       const txt = `${b.label}  ${b.start}–${b.end}`;
       const tw = ctx.measureText(txt).width;
       ctx.fillStyle = hexA(hot ? "#f7ead0" : RIBBON_COLOR[b.kind], (lit ? (hot ? 1 : 0.7) : 0.25) * intro);
-      ctx.fillText(txt, edge, yy);
-      ribbonHits.push({ x0: edge - tw, y0: yy - rowH / 2, x1: edge, y1: yy + rowH / 2, node: b.node });
+      ctx.fillText(txt, textEdge, yy);
+      ribbonHits.push({ x0: textEdge - tw, y0: yy - rowH / 2, x1: textEdge, y1: yy + rowH / 2, node: b.node });
       yy += rowH;
     }
   }
@@ -754,7 +851,7 @@ function setView(next) {
   // Reset camera to a sensible frame for the new view.
   const frame = frameForView(next);
   flyTo(frame.x, frame.y, frame.scale, 700);
-  writeHashView();
+  writeHash();
   dirty = true;
 }
 
@@ -769,9 +866,10 @@ function reflectViewChrome() {
 // nodes sub-pixel. Called from every code path that moves cam.x/y/scale.
 function clampCamera() {
   if (state.view === "explore") return;
-  // Scale: a floor that keeps the smallest dot ≥ 1px on screen, a ceiling that
-  // prevents zooming so deep a single year row leaves the viewport.
-  const minScale = Math.max(0.25, canvas.clientHeight / (TIMELINE_H * 1.4));
+  // Scale: the floor is the fit-the-whole-axis frame (with a little slack) so
+  // zooming all the way out lands exactly on the shareable overview; the
+  // ceiling prevents zooming so deep a single year row leaves the viewport.
+  const minScale = canvas.clientHeight / (TIMELINE_H * 1.25);
   cam.scale = Math.max(minScale, Math.min(6, cam.scale));
   // Vertical: a small slack past the YEAR_MIN/MAX rows so the top/bottom
   // labels don't sit flush against the edge.
@@ -789,24 +887,11 @@ function frameForView(view) {
   if (view === "explore") {
     return frameOfPoints(nodes.map((n) => ({ x: n.x, y: n.y })));
   }
-  // Timeline: zooming out to fit 1880→2026 makes individual dots sub-pixel and
-  // hides the labels. Instead, frame ~50 years around an anchor — the pinned
-  // doc if you have one, else the most-recent encyclical (currently Magnifica
-  // Humanitas). Lets you read titles immediately and scroll outward for context.
-  const t = targets.timeline;
-  const pinned = [...selectedIds]
-    .map((id) => nodeById.get(id))
-    .find((n) => n && n.type === "document" && n.year);
-  const sources = nodes
-    .filter((n) => n.is_source && n.year)
-    .sort((a, b) => b.year - a.year);
-  const anchor = pinned || sources[0];
-  if (!anchor) return frameOfPoints([{ x: 0, y: 0 }]);
-  const pos = t.get(anchor.id) || { x: 0, y: yearToY(anchor.year) };
-  // ~50-year window vertically; horizontally centered on the anchor's column.
-  const winYears = 55;
-  const scale = canvas.clientHeight / ((winYears / (YEAR_MAX - YEAR_MIN)) * TIMELINE_H);
-  return { x: pos.x, y: pos.y, scale };
+  // Timeline opens on the whole axis — every encyclical labelled (the
+  // de-overlap pass keeps them legible), ambient edges faded away, the gutter
+  // alongside. That frame *is* the shareable poster; scroll to dive into a
+  // pontificate.
+  return { x: 0, y: 0, scale: canvas.clientHeight / (TIMELINE_H * 1.08) };
 }
 
 function frameOfPoints(pts, pad = 1.18) {
@@ -837,16 +922,48 @@ function buildViewSwitcher() {
   });
 }
 
-function readHashView() {
-  const m = /^#view=(explore|timeline)\b/.exec(window.location.hash);
-  if (m) setView(m[1]);
+// ---- permalink -------------------------------------------------------------
+// The hash mirrors the full view state — view, pinned selection, camera — so
+// the address bar is always a link to exactly what's on screen ("Copy link"
+// just grabs it). Node ids can contain "," and "|", so each id is
+// percent-encoded individually and the raw (still-encoded) value is split on
+// "," before decoding — no URLSearchParams, which would decode too early.
+const camWatch = { x: NaN, y: NaN, s: NaN, t: 0, pending: false };
+let hashHadCam = false;      // did the URL pin an explicit camera on load?
+
+function writeHash() {
+  const parts = [];
+  if (state.view !== "explore") parts.push(`view=${state.view}`);
+  if (selectedIds.size)
+    parts.push(`sel=${[...selectedIds].map(encodeURIComponent).join(",")}`);
+  parts.push(`cam=${cam.x.toFixed(1)},${cam.y.toFixed(1)},${cam.scale.toFixed(3)}`);
+  history.replaceState(null, "", `#${parts.join("&")}`);
 }
 
-function writeHashView() {
-  if (state.view === "explore") {
-    history.replaceState(null, "", window.location.pathname);
-  } else {
-    history.replaceState(null, "", `#view=${state.view}`);
+function readHash() {
+  const h = window.location.hash.slice(1);
+  if (!h) return;
+  const kv = {};
+  for (const part of h.split("&")) {
+    const i = part.indexOf("=");
+    if (i > 0) kv[part.slice(0, i)] = part.slice(i + 1);
+  }
+  if (VIEWS.includes(kv.view)) setView(kv.view);
+  if (kv.sel) {
+    for (const tok of kv.sel.split(",")) {
+      const n = nodeById.get(decodeURIComponent(tok));
+      if (n) { selectedIds.add(n.id); detailNode = n; }
+    }
+    if (selectedIds.size) afterSelectionChange();
+  }
+  if (kv.cam) {
+    const [x, y, s] = kv.cam.split(",").map(Number);
+    if ([x, y, s].every(Number.isFinite)) {
+      tween = null;                      // beat the setView fly-to
+      cam.x = x; cam.y = y; cam.scale = s;
+      clampCamera(); dirty = true;
+      hashHadCam = true;
+    }
   }
 }
 
@@ -1082,6 +1199,7 @@ function afterSelectionChange() {
   computeHighlight();
   showDetail(detailNode);
   renderSelectionBar();
+  writeHash();
   dirty = true;
 }
 
@@ -1366,7 +1484,9 @@ function clearFilters() {
 }
 
 // ---- stats ----------------------------------------------------------------
+let corpusMeta = null;    // kept for the image-export footer
 function buildStats(meta) {
+  corpusMeta = meta;
   const el = document.getElementById("stats");
   const items = [
     [meta.documents, "Works"],
@@ -1377,4 +1497,123 @@ function buildStats(meta) {
   el.innerHTML = items
     .map(([n, l]) => `<div class="stat"><span class="num">${(n || 0).toLocaleString()}</span><span class="lbl">${l}</span></div>`)
     .join("");
+}
+
+// ---- share -----------------------------------------------------------------
+function buildShare() {
+  const linkBtn = document.getElementById("share-link");
+  const imgBtn = document.getElementById("share-image");
+  linkBtn.addEventListener("click", async () => {
+    writeHash();
+    const url = window.location.href;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const ta = document.createElement("textarea");   // file:// / http fallback
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    flashButton(linkBtn, "Copied ✓");
+  });
+  imgBtn.addEventListener("click", () => {
+    exportImage();
+    flashButton(imgBtn, "Saved ✓");
+  });
+}
+
+function flashButton(btn, text) {
+  if (btn.dataset.flashing) return;
+  btn.dataset.flashing = "1";
+  const orig = btn.textContent;
+  btn.textContent = text;
+  btn.classList.add("done");
+  setTimeout(() => {
+    btn.textContent = orig;
+    btn.classList.remove("done");
+    delete btn.dataset.flashing;
+  }, 1600);
+}
+
+// Compose the current canvas into a self-contained "poster" PNG: ground +
+// vignette, the graph exactly as drawn, plus a painted masthead and footer
+// standing in for the DOM chrome (which lives outside the canvas). 2× pixels.
+function exportImage() {
+  const W = canvas.clientWidth, H = canvas.clientHeight, S = 2;
+  const out = document.createElement("canvas");
+  out.width = W * S;
+  out.height = H * S;
+  const c = out.getContext("2d");
+  c.scale(S, S);
+
+  // ground + warm center glow, echoing the page atmosphere
+  c.fillStyle = "#0c0a07";
+  c.fillRect(0, 0, W, H);
+  let g = c.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.42, Math.max(W, H) * 0.75);
+  g.addColorStop(0, "rgba(58,44,22,0.35)");
+  g.addColorStop(1, "rgba(12,10,7,0)");
+  c.fillStyle = g;
+  c.fillRect(0, 0, W, H);
+
+  c.drawImage(canvas, 0, 0, W, H);
+
+  // vignette over the data, under the type
+  g = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.8);
+  g.addColorStop(0, "rgba(5,4,2,0)");
+  g.addColorStop(1, "rgba(5,4,2,0.65)");
+  c.fillStyle = g;
+  c.fillRect(0, 0, W, H);
+
+  // masthead
+  c.textAlign = "left";
+  c.textBaseline = "alphabetic";
+  c.fillStyle = "#d8b65f";
+  c.font = '500 30px "Cormorant Garamond", serif';
+  c.fillText("✝", 44, 86);
+  c.fillStyle = "#ece2cd";
+  c.font = '500 52px "Cormorant Garamond", serif';
+  c.fillText("Catena", 84, 88);
+  g = c.createLinearGradient(86, 0, 236, 0);
+  g.addColorStop(0, "#d8b65f");
+  g.addColorStop(1, "rgba(216,182,95,0)");
+  c.fillStyle = g;
+  c.fillRect(86, 102, 150, 1);
+  c.fillStyle = "#b6a988";
+  c.font = 'italic 17px "EB Garamond", serif';
+  c.fillText("The web of tradition — the citations that bind the encyclicals", 86, 130);
+  c.fillText("to councils, saints, and scripture.", 86, 152);
+
+  // footer: corpus figures, what's pinned, provenance
+  const lines = [];
+  if (corpusMeta) {
+    lines.push(
+      `${(corpusMeta.documents || 0).toLocaleString()} works · ` +
+      `${(corpusMeta.authors || 0).toLocaleString()} authors · ` +
+      `${(corpusMeta.scripture || 0).toLocaleString()} scripture passages · ` +
+      `${(corpusMeta.edges || 0).toLocaleString()} threads`);
+  }
+  if (selectedIds.size) {
+    const names = [...selectedIds].map((id) => nodeById.get(id)?.label).filter(Boolean);
+    lines.push(`Tracing: ${names.slice(0, 4).join(" · ")}${names.length > 4 ? " …" : ""}`);
+  }
+  lines.push("github.com/jkeuhlen/catena");
+  let fy = H - 28 - (lines.length - 1) * 22;
+  for (let i = 0; i < lines.length; i++) {
+    const last = i === lines.length - 1;
+    c.font = `500 ${last ? 13 : 15}px "EB Garamond", serif`;
+    c.fillStyle = last ? "rgba(216,182,95,0.75)" : "#b6a988";
+    c.fillText(lines[i], 44, fy);
+    fy += 22;
+  }
+
+  out.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `catena-${state.view}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
 }

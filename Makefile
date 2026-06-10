@@ -45,7 +45,7 @@ $(PREVIEW): $(GRAPH) site/index.html site/styles.css site/app.js
 		sleep 1; \
 		"$(CHROME)" --headless --disable-gpu --hide-scrollbars --window-size=1600,1000 \
 			--screenshot="$(CURDIR)/$(PREVIEW)" --virtual-time-budget=4000 \
-			"http://localhost:$(PORT)/" >/dev/null 2>&1; \
+			"http://localhost:$(PORT)/?still=1" >/dev/null 2>&1; \
 		status=$$?; kill $$srv 2>/dev/null; \
 		test $$status -eq 0 && echo "Wrote $(PREVIEW)" || { echo "screenshot failed"; exit 1; }
 

@@ -6,6 +6,17 @@
   <title>Catena — The Web of Tradition</title>
   <meta name="description" content="A visualization of the connected net of citations within the papal encyclicals — the councils, saints, and scripture they draw upon." />
 
+  <!-- social cards — og:image must be an absolute URL; point it at the
+       production domain once the Cloudflare deploy lands -->
+  <meta property="og:title" content="Catena — The Web of Tradition" />
+  <meta property="og:description" content="An interactive constellation of the citations that bind the papal encyclicals to councils, saints, and scripture." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="https://raw.githubusercontent.com/jkeuhlen/catena/master/docs/preview.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Catena — The Web of Tradition" />
+  <meta name="twitter:description" content="An interactive constellation of the citations that bind the papal encyclicals to councils, saints, and scripture." />
+  <meta name="twitter:image" content="https://raw.githubusercontent.com/jkeuhlen/catena/master/docs/preview.png" />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=EB+Garamond:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
@@ -42,6 +53,10 @@
       <ul class="search__results" id="search-results" role="listbox" hidden></ul>
     </div>
     <aside class="stats" id="stats" aria-label="Corpus statistics"></aside>
+    <div class="share" aria-label="Share this view">
+      <button class="share__btn" id="share-link" title="Copy a link that restores this exact view, selection, and zoom">Copy link</button>
+      <button class="share__btn" id="share-image" title="Download this view as an image">Save image</button>
+    </div>
   </div>
 
   <!-- view switcher (top-center) -->

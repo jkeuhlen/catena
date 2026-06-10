@@ -227,6 +227,21 @@ body.reading { overflow: auto; }
 }
 .search__empty { padding: 0.7rem 0.6rem; color: var(--parchment-dim); font-style: italic; font-size: 0.95rem; }
 
+/* ---- share buttons (copy link / save image) --------------------- */
+.share { display: flex; gap: 0.5rem; }
+.share__btn {
+  padding: 0.42rem 0.9rem; cursor: pointer;
+  background: var(--ink-panel); color: var(--parchment-dim);
+  border: 1px solid var(--rule); border-radius: 2px;
+  backdrop-filter: blur(7px);
+  box-shadow: 0 10px 26px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,240,200,0.04);
+  font-family: var(--serif-display); font-weight: 500;
+  font-size: 0.68rem; letter-spacing: 0.16em; text-transform: uppercase;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.share__btn:hover { color: var(--gold); border-color: rgba(216,182,95,0.5); }
+.share__btn.done { color: var(--gold-bright); border-color: rgba(216,182,95,0.6); }
+
 /* ---- corpus stats ----------------------------------------------- */
 /* content-sized & right-aligned so it grows leftward (and wraps) as the
    numbers climb, rather than overflowing a fixed box. */
@@ -453,6 +468,7 @@ body.reading { overflow: auto; }
   .search { width: min(17rem, 70vw); }
   .stats { padding: 0.7rem 0.9rem; gap: 0.5rem 1rem; max-width: 70vw; }
   .stats .num { font-size: 1.4rem; }
+  .share__btn { padding: 0.34rem 0.65rem; font-size: 0.62rem; letter-spacing: 0.12em; }
   .legend { left: 1.2rem; bottom: 1.2rem; padding: 0.8rem 1rem; }
   .detail { right: 1.2rem; left: 1.2rem; bottom: 1.2rem; width: auto; }
   .selection { top: auto; bottom: 11rem; max-width: 92vw; }

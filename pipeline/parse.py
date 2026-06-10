@@ -606,7 +606,7 @@ def _bracket_notes(soup: BeautifulSoup) -> list[tuple[int, Tag]]:
     if len(candidates) < 20:
         return []
     nums = [n for n, _ in candidates]
-    if any(b < a for a, b in zip(nums, nums[1:])):
+    if any(b < a for a, b in zip(nums, nums[1:], strict=False)):
         return []
     return candidates
 

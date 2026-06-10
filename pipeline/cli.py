@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-
 from urllib.parse import urlparse
 
 from . import fetch, graph, layout, normalize, parse, paths, pontiffs
