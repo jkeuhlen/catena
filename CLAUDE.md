@@ -45,6 +45,8 @@ pipeline/
   works.py      curated canonicalization of famous classical/patristic works
   bodies.py     curated curia / council / dicastery URL-slug → author name
   pontiffs.py   curated pope records (slug, ordinal, reign, profile URLs)
+  lifespans.py  curated temporal spans for council & saint author nodes
+                (dates for the Timeline ribbon gutter; popes come from pontiffs)
   scripture.py  biblical citation parsing (Catholic 73-book canon)
   graph.py      ParsedDocuments → deduplicated {nodes, edges, meta}
   layout.py     force-directed layout precompute (networkx spring_layout)
@@ -141,6 +143,20 @@ illuminated manuscript — gold leaf / lapis / oxblood on aged-ink; Cormorant
 Garamond + EB Garamond. Interactions: click pins a node (multi-select; 2+ reveals
 bridge nodes), search (`/`) flies to a node, legend swatches filter by category,
 Esc clears.
+
+**Timeline view** (`#view=timeline`) lays documents on a chronological y-axis
+(year) with a beeswarm x-spread. Two deliberate departures from Explore: (1)
+**dots are uniform** — degree-sizing is suppressed in any non-Explore view
+(`radius()` short-circuits) because position, not size, carries the meaning;
+(2) a **right-edge "ribbon gutter"** paints dated author context — pope reigns,
+councils, and saint lifetimes — as vertical bands clamped to the axis, sourced
+from each author node's `span` field (`graph.finalize`, from `pontiffs`/
+`lifespans`). Bands are screen-pinned (like the year axis), lane-packed per kind
+(reign/life/council zones, edge→swarm), deduped across the fragmented council
+author keys, and clickable (pins the author node → lights the encyclicals citing
+it). Figures whose whole span predates the axis window (most Fathers) collect
+into an "earlier" stack at the top of the gutter. To add/fix a date, edit
+`pipeline/lifespans.py` (the curated extension point) and `make build`.
 
 **CSS gotcha (bitten 3×):** a class with an explicit `display` beats the `[hidden]`
 attribute's `display:none`. Any element toggled via `el.hidden = true` that also

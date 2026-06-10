@@ -33,6 +33,12 @@ const detailFilters = new Set();               // category filters scoped to det
 let detailRowIds = new Map();                  // cat -> Set<id> for the rows currently in the panel
 let highlight = null;                         // Set of node ids to keep lit
 let connectors = new Set();                    // bridge nodes linking 2+ selected
+// Timeline ribbon gutter: dated author bands (pope reigns, councils, saint
+// lifetimes) drawn pinned to the right edge. `bands`/`ancient` are computed
+// once from node spans; `hits` is repopulated each frame for click/hover.
+let timelineRibbons = { bands: [], ancient: [], zoneBase: {} };
+let ribbonHits = [];                           // [{x0,y0,x1,y1,node}] for the last frame
+let ribbonHover = null;                        // author node under the cursor in the gutter
 let intro = 0;                                // 0→1 entrance progress
 let dirty = true;
 let tween = null;                             // active camera fly-to, or null
@@ -57,7 +63,14 @@ const TIMELINE_H = 4200;
 const TIMELINE_W = 2400;     // horizontal spread within the widest year
 
 // ---- node visual scale ----------------------------------------------------
+// Explore sizes nodes by citation degree (the eye should land on what matters
+// in a force-directed cloud). The chronological views deliberately DON'T:
+// there, position *is* the information (year on the y-axis), and degree-scaling
+// just turns the swarm into an unreadable jumble of fat and tiny dots. So in
+// any non-Explore view every dot is a uniform tick, with sources nudged a hair
+// larger so the narrative spine stays findable.
 const radius = (n) => {
+  if (state.view !== "explore") return n.is_source ? 5 : 3;
   if (n.type === "scripture") return 3 + Math.sqrt(n.degree) * 1.1;
   if (n.type === "author")    return 3.5 + Math.sqrt(n.degree) * 1.3;
   const base = n.is_source ? 14 : 3.2;
@@ -100,6 +113,7 @@ async function init() {
     YEAR_MAX = Math.max(new Date().getFullYear(), Math.max(...allYears)) + 1;
   }
   buildTimelineTargets();
+  buildTimelineRibbons();
 
   buildStats(data.meta);
   buildSearch();
@@ -312,6 +326,9 @@ function draw() {
     ctx.fillStyle = hexA(isSel ? "#f7ead0" : n.is_source ? "#f4e4bd" : "#ece2cd", alpha);
     ctx.fillText(label, x + r + 6, y);
   }
+
+  // chronological context ribbon (reigns / councils / lifetimes) on the right
+  if (state.view !== "explore") drawTimelineRibbons(W, H);
 
   // focus pulse — an expanding ring that announces the searched node
   if (pulse) {
@@ -552,12 +569,186 @@ function buildTimelineTargets() {
   }
 }
 
+// ---- timeline ribbon gutter ----------------------------------------------
+// Lay out the dated author bands once. Each band carries a year range; we pack
+// time-overlapping bands of the same kind into adjacent lanes, then group the
+// kinds into three zones stacked inward from the right edge:
+//   reign (gold, edge) · life (oxblood) · council (lapis, nearest the swarm).
+// Figures whose whole span predates the axis window (most Fathers — Augustine,
+// Aquinas, Chrysostom) can't sit on a 1870→now axis, so they collect into an
+// "earlier" stack pinned to the top of the gutter, preserving the chain back.
+const RIBBON_COLOR = { reign: "#d8b65f", council: "#5a82c4", life: "#c05a44" };
+const RIBBON_ZONES = ["reign", "life", "council"];   // edge → swarm
+
+function buildTimelineRibbons() {
+  // One historical figure can surface under several author keys (Vatican II is
+  // four nodes; Irenaeus two). Collapse identical spans to a single band,
+  // keeping the highest-degree node so a click pins the best-connected one.
+  const dedup = new Map();
+  for (const n of nodes) {
+    if (!n.span) continue;
+    const s = n.span;
+    const key = `${s.kind}|${s.start}|${s.end}|${s.label}`;
+    const prev = dedup.get(key);
+    if (!prev || (n.degree || 0) > (prev.degree || 0)) dedup.set(key, n);
+  }
+  const inWin = [], ancient = [];
+  for (const n of dedup.values()) {
+    const s = n.span;
+    const ongoing = s.end == null;
+    const end = ongoing ? YEAR_MAX : s.end;
+    const band = { node: n, kind: s.kind, start: s.start, end, ongoing,
+                   label: s.label || n.label };
+    if (end < YEAR_MIN) ancient.push(band);
+    else inWin.push(band);
+  }
+  // Greedy lane packing, per kind, by clamped year interval. Sequential spans
+  // (consecutive papal reigns share a boundary year) collapse into one lane;
+  // overlapping spans (a council inside a reign) split into separate lanes.
+  const byKind = { reign: [], life: [], council: [] };
+  for (const b of inWin) {
+    b.cs = Math.max(YEAR_MIN, b.start);
+    b.ce = Math.min(YEAR_MAX, b.end);
+    byKind[b.kind].push(b);
+  }
+  const zoneBase = {};
+  let base = 0;
+  for (const kind of RIBBON_ZONES) {
+    const list = byKind[kind].sort((a, b) => a.cs - b.cs || a.ce - b.ce);
+    const laneEnds = [];
+    for (const b of list) {
+      let lane = 0;
+      while (lane < laneEnds.length && laneEnds[lane] > b.cs) lane++;
+      b.lane = lane;
+      laneEnds[lane] = b.ce;
+    }
+    zoneBase[kind] = base;
+    base += Math.max(laneEnds.length, kind === "council" ? 0 : 1);
+  }
+  ancient.sort((a, b) => a.start - b.start);
+  timelineRibbons = { bands: inWin, ancient, zoneBase };
+}
+
+const RIBBON_PITCH = 20;     // px between lanes
+const RIBBON_W = 9;          // band width
+const RIBBON_EDGE = 16;      // px from the right edge to the first (reign) lane
+
+// Screen-y for a year, via the shared camera transform.
+const yearToScreenY = (year) => toScreen(0, yearToY(year))[1];
+
+function drawTimelineRibbons(W, H) {
+  ribbonHits = [];
+  const { bands, ancient, zoneBase } = timelineRibbons;
+  const edge = W - RIBBON_EDGE;
+  const litNode = (n) => !highlight || highlight.has(n.id);
+
+  for (const b of bands) {
+    let y0 = yearToScreenY(b.cs), y1 = yearToScreenY(b.ce);
+    if (y1 < -2 || y0 > H + 2) continue;
+    const top = Math.max(2, y0), bot = Math.min(H - 2, y1);
+    const x1 = edge - (zoneBase[b.kind] + b.lane) * RIBBON_PITCH;
+    const x0 = x1 - RIBBON_W;
+    const sel = selectedIds.has(b.node.id);
+    const hot = sel || ribbonHover === b.node || b.node === hovered;
+    const lit = litNode(b.node) || hot;
+    const col = RIBBON_COLOR[b.kind];
+
+    ctx.beginPath();
+    roundRect(ctx, x0, top, RIBBON_W, Math.max(2, bot - top), 4);
+    ctx.fillStyle = hexA(col, (lit ? (hot ? 0.92 : 0.6) : 0.18) * intro);
+    ctx.fill();
+    if (hot) {
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = hexA("#f4e4bd", 0.9 * intro);
+      ctx.stroke();
+    }
+    // spine label: vertical text up the band when it's tall enough, else only
+    // on hover/selection (keeps the dense modern column legible).
+    const h = bot - top;
+    if (h > 34 || hot) {
+      ctx.save();
+      ctx.translate(x0 + RIBBON_W / 2, (top + bot) / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const fs = hot ? 13 : 12;
+      ctx.font = `${hot ? 600 : 500} ${fs}px "Cormorant Garamond", serif`;
+      const maxW = Math.min(h - 6, 260);
+      const label = fitText(ctx, b.label, maxW);
+      ctx.fillStyle = hexA("#0c0a07", 0.8 * intro);
+      ctx.fillText(label, 0.8, 0.8);   // drop shadow for legibility over the swarm
+      ctx.fillStyle = hexA(hot ? "#f7ead0" : "#ece2cd", (hot ? 1 : 0.85) * intro);
+      ctx.fillText(label, 0, 0);
+      ctx.restore();
+    }
+    ribbonHits.push({ x0, y0: top, x1, y1: bot, node: b.node });
+  }
+
+  // "earlier" stack — Fathers whose lifetimes predate the axis window.
+  if (ancient.length) {
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    let yy = 96;
+    const rowH = 17;
+    ctx.font = `600 11px "Cormorant Garamond", serif`;
+    ctx.fillStyle = hexA("#b6a988", 0.6 * intro);
+    ctx.fillText("· earlier ·", edge, yy);
+    yy += rowH + 2;
+    for (const b of ancient) {
+      if (yy > H - 24) {
+        ctx.fillStyle = hexA("#b6a988", 0.5 * intro);
+        ctx.font = `500 11px "Cormorant Garamond", serif`;
+        ctx.fillText("…", edge, yy);
+        break;
+      }
+      const hot = selectedIds.has(b.node.id) || ribbonHover === b.node;
+      const lit = !highlight || highlight.has(b.node.id) || hot;
+      ctx.font = `${hot ? 600 : 500} 12px "Cormorant Garamond", serif`;
+      const txt = `${b.label}  ${b.start}–${b.end}`;
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = hexA(hot ? "#f7ead0" : RIBBON_COLOR[b.kind], (lit ? (hot ? 1 : 0.7) : 0.25) * intro);
+      ctx.fillText(txt, edge, yy);
+      ribbonHits.push({ x0: edge - tw, y0: yy - rowH / 2, x1: edge, y1: yy + rowH / 2, node: b.node });
+      yy += rowH;
+    }
+  }
+}
+
+function ribbonAt(sx, sy) {
+  for (const r of ribbonHits) {
+    if (sx >= r.x0 - 3 && sx <= r.x1 + 3 && sy >= r.y0 && sy <= r.y1) return r.node;
+  }
+  return null;
+}
+
+function roundRect(c, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+}
+
+// Truncate `s` with an ellipsis to fit `maxW` px in the current ctx font.
+function fitText(c, s, maxW) {
+  if (c.measureText(s).width <= maxW) return s;
+  let lo = 0, hi = s.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (c.measureText(s.slice(0, mid) + "…").width <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? s.slice(0, lo) + "…" : "";
+}
+
 function setView(next) {
   if (!VIEWS.includes(next)) return;
   // snapshot current positions as the animation source
   const from = new Map();
   for (const n of nodes) from.set(n.id, { x: n._x, y: n._y, op: n._op });
   state.view = next;
+  ribbonHover = null;
   viewTween = { from, t0: performance.now(), dur: VIEW_TWEEN_MS };
   reflectViewChrome();
   // Reset camera to a sensible frame for the new view.
@@ -711,7 +902,11 @@ function bindEvents() {
       return;
     }
     const rect = canvas.getBoundingClientRect();
-    const n = nodeAt(e.clientX - rect.left, e.clientY - rect.top);
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    // Timeline gutter ribbons take hover priority over the swarm behind them.
+    const rib = state.view !== "explore" ? ribbonAt(sx, sy) : null;
+    if (rib !== ribbonHover) { ribbonHover = rib; dirty = true; }
+    const n = rib || nodeAt(sx, sy);
     if (n !== hovered) {
       hovered = n;
       // hover preview only when idle (nothing pinned and no filter active)
@@ -724,8 +919,9 @@ function bindEvents() {
   canvas.addEventListener("click", (e) => {
     if (moved) return;
     const rect = canvas.getBoundingClientRect();
-    const n = nodeAt(e.clientX - rect.left, e.clientY - rect.top);
-    toggleSelect(n);   // null (empty space) clears the selection
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const rib = state.view !== "explore" ? ribbonAt(sx, sy) : null;
+    toggleSelect(rib || nodeAt(sx, sy));   // null (empty space) clears the selection
   });
 
   canvas.addEventListener("wheel", (e) => {

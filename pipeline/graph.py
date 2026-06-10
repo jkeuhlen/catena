@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from . import pontiffs
+from . import lifespans, pontiffs
 from .parse import ParsedDocument
 
 
@@ -169,7 +169,11 @@ class GraphBuilder:
                 n["year"] = _year_of(n.get("date"), n.get("url"))
         # tag author nodes that name a pope with their pontiff record so the
         # site can render the specialised card. The legend category stays
-        # ``author`` — filters and counts are unaffected.
+        # ``author`` — filters and counts are unaffected. Every dated author
+        # (pope, council, or saint) also gets a ``span`` — the chronological
+        # extent the Timeline ribbon gutter draws: a reign, a council, or a
+        # lifetime. Pope spans come from the pontiff record; councils and
+        # saints from the curated ``lifespans`` table.
         for n in self.nodes.values():
             if n["type"] != "author":
                 continue
@@ -177,6 +181,21 @@ class GraphBuilder:
             rec = pontiffs.lookup(key)
             if rec:
                 n["pontiff"] = rec
+                n["span"] = {
+                    "kind": "reign",
+                    "start": rec["reign_start"],
+                    "end": rec["reign_end"],
+                    "label": n.get("label") or rec["display_name"],
+                }
+                continue
+            sp = lifespans.lookup(key)
+            if sp:
+                n["span"] = {
+                    "kind": sp.kind,
+                    "start": sp.start,
+                    "end": sp.end,
+                    "label": sp.label or n.get("label"),
+                }
         # degree (undirected) for sizing
         deg: dict[str, int] = {nid: 0 for nid in self.nodes}
         for e in self.edges.values():
